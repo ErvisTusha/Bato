@@ -1,0 +1,27 @@
+# Generated build outputs, benchmark reports, datasets, and scratch files
+/target/
+/bin/
+/lib/
+/artifacts/
+/multi_corpus/
+/large_corpus/
+/scratch/
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Editor and operating system files
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Downloaded corpora (regenerate with scripts/download_corpus.py)
+/data-research/corpus/*
+/data-research/test-results/*
+
+# Local benchmark measurements
+/data-research/measurements.sqlite3
+/data-research/measurements.sqlite3-*

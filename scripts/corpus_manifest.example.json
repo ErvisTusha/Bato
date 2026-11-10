@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "assets": [
+    {
+      "id": "custom-poi-document",
+      "category": "custom",
+      "urls": [
+        "https://raw.githubusercontent.com/apache/poi/ae62bb5116b9aee19ebd5834e3a82066132c9f7f/test-data/document/SampleDoc.docx"
+      ],
+      "destination": "real/custom/SampleDoc.docx",
+      "origin": "real",
+      "version": "ae62bb5116b9aee19ebd5834e3a82066132c9f7f",
+      "license": "Apache-2.0",
+      "transfer_bytes": 2000000,
+      "prepared_bytes": 2000000,
+      "expected_size": 11611,
+      "sha256": "ea2c517bd7be4628887eb97f630334b93b894f4522d2c0adae263e602d76df92",
+      "validation": "docx"
+    }
+  ]
+}

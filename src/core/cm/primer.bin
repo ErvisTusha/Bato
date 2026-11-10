@@ -1,0 +1,1963 @@
+# Bato
+
+Bato is an original, lossless, byte-oriented compressor and archiver written in Rust. It has one compression mode, always its strongest: byte-cost selection among context mixing, independent literal/copy commands, encoder-built canonical Huffman tables and run storage. Files, stdin streams and directory trees all use it.
+
+Bato accepts arbitrary file contents, including unknown formats, invalid UTF-8, already compressed or encrypted data and misleading names. Compression decisions follow byte patterns only, never names, extensions or MIME types. Incompressible segments are stored raw with bounded framing overhead, so not every input becomes smaller.
+
+## Build
+
+```bash
+cargo build --release --locked
+```
+
+## Use
+
+```bash
+bato input.dat                      # writes input.dat.bato
+bato -d input.dat.bato              # restores input.dat
+bato -t input.dat.bato              # verifies without writing
+bato -i input.dat.bato              # shows header and blocks
+bato archive project                # writes project.bato
+bato extract project.bato -o out    # restores the tree
+```
+
+Single files and directory trees both use the `.bato` extension; the header records which one a file holds. Decoding reads the geometry from the header, never from command-line settings. Original bytes and supported names are restored exactly. Checksums, output limits and staged extraction are always active.
+
+## Extract selected files or folders
+
+```bash
+bato extract project.bato -o out docs/readme.txt assets
+bato extract project.bato -o out -- -notes.txt
+```
+
+Use exact, archive-relative paths with `/` separators and omit the trailing
+slash on folder names. A folder selection includes its descendants, including
+empty folders. Bato preserves the directory structure and fails before writing
+to the destination if a requested path is missing. With `--public-only`, paths
+are matched against the public section. To resume a checkpointed extraction,
+pass the same member arguments.
+
+Bato still decodes and verifies the full requested archive or public section
+and needs temporary disk space to stage it. Only the selected entries and their
+parent directories are published.
+
+## Edit, split, and protect archives
+
+```bash
+bato add project.bato notes.txt assets/        # add at archive root
+bato remove project.bato notes.txt assets/old  # remove a file or a subtree
+bato archive project --split-size 104857600 -o project-split.bato
+bato extract project-split.bato -o restored
+```
+
+Edits rebuild the solid archive and publish the replacement after a successful
+write. Adding a directory merges it by basename. Pass `-f` to replace existing
+files during an add. Remove paths are relative to the archive root. For an
+argument that starts with a dash, place it after `--`. A split archive is a
+directory containing an index and numbered parts. Keep the entire directory
+together when moving it. The example caps each part at 100 MiB. Edits keep the
+existing split size. Create split or password-protected output outside the
+source tree. Split operations need temporary disk space for the assembled
+stream, and edits need space for a staged extraction.
+
+```bash
+# Protect the complete archive, including filenames
+bato archive project --password-file key.txt -o full.bato
+bato extract full.bato --password-file key.txt -o restored-full
+
+# Protect only selected paths. Repeat --protect for multiple paths.
+bato archive project --password-file key.txt --protect private/records \
+  --protect credentials.json -o selective.bato
+bato extract selective.bato --public-only -o public-files
+bato extract selective.bato --password-file key.txt -o all-files
+
+# Add a protected folder to an existing selectively protected archive
+bato add selective.bato confidential --password-file key.txt --protect confidential
+```
+
+Keep the UTF-8 password file outside the archived tree with access restricted
+to its owner. Bato strips one trailing newline. Each archive uses one password.
+Selective archives expose public names and contents and may reveal shared
+ancestor names and section sizes. Existing protection survives edits. New
+members added to a selectively protected archive are public unless they fall
+under a protected path or you select them with `--protect`. Encrypted archives
+require the password for editing and full verification. To verify only the
+public section, use `bato -t selective.bato --public-only`. Both protection modes
+can be combined with split volumes. These features apply to directory archives.
+
+## Pause, resume, and recover
+
+A checkpoint preserves completed segments across a process exit. Give it a
+new, separate directory, then repeat the command with `--resume` and the same
+input, output, and format settings.
+
+```bash
+bato archive project -o project.bato --checkpoint encode-job --pause-file hold
+# From another terminal, request a pause
+touch hold
+# After Bato reports that it paused, remove the marker and resume
+rm hold
+bato archive project -o project.bato --resume encode-job
+
+bato extract project.bato -o restored --checkpoint decode-job --pause-after-segments 3
+bato extract project.bato -o restored --resume decode-job
+```
+
+The same flags work with `bato FILE` and `bato -d ARCHIVE`. Bato checks
+the input and checkpoint data before continuing. Work beyond the last
+committed boundary can be repeated after a pause or interruption. Directory
+extraction checkpoints the decoded catalogue and materializes files after
+the complete stream verifies. If an interruption during final publication
+leaves existing files, inspect them before rerunning with `--resume` and
+`-f` to permit replacement. Successful jobs clean up their checkpoints.
+
+Split and password-protected jobs use the same flags. Pass the same password
+file on resume. Private checkpoint records are encrypted and authenticated
+with a job key protected by the archive passphrase. Preparing inputs,
+joining volumes, authenticating or writing the outer encryption envelope,
+and publishing output can restart as needed. Checkpointing uses extra
+temporary disk space for seekable staging. Plain compression produces the
+same archive bytes with or without checkpoints.
+
+```bash
+# Reconstruct one missing or damaged volume
+bato archive project --split-size 104857600 --parity -o split.bato
+bato repair-split split.bato -o repaired.bato
+
+# Prepare the salvage index while the plain archive is still intact
+bato recovery-index project.bato -o project.recovery
+bato recover project.bato --index project.recovery -o salvaged
+```
+
+A parity-enabled split archive adds one parity volume, at most the size of
+one data volume, plus SHA-256 hashes in the index. Extraction can reconstruct
+one missing or damaged data volume in temporary storage. `repair-split`
+writes a separate verified copy and can regenerate damaged parity when the
+data volumes are intact.
+
+Keep the salvage index separately from the plain archive. Recovery of a
+folder restores complete verified members and reports missing files. For a
+single-file stream, recovery writes verified segments named with their
+original byte offsets. Recovery requires a new destination. For a damaged
+password-protected archive, split parity can restore the original ciphertext
+before authentication.
+
+## Archive inspection, indexed extraction, and job status
+
+```bash
+bato list project.bato --json
+bato diff project.bato project-updated.bato --json
+bato diff project.bato ./project
+bato health split.bato --json
+bato archive project --indexed --password-file password.txt -o indexed.bato
+bato extract indexed.bato docs/report.pdf --password-file password.txt -o restored
+bato recovery-index project.bato -o project.recovery
+bato extract project.bato docs/report.pdf --index project.recovery -o restored --stats
+bato archive project -o backup.bato --checkpoint encode-job --progress
+bato job-status encode-job
+bato archive project --split-size 104857600 --parity-volumes 2 -o split.bato
+```
+
+Listing verifies and streams the catalogue without writing an extracted
+tree. It reports paths, entry types and original sizes. Use a password for
+protected contents or `--public-only` to inspect the public section.
+
+`diff` reports added, removed and changed paths against a second archive or a
+live directory. It uses SHA-256 for file contents and detects file/directory
+changes. A supplied password applies to both archives when needed.
+
+`health` verifies a regular directory archive. For a split archive it reports
+missing or damaged volumes, whether the assembled archive SHA-256 verified,
+and whether repair is possible. A degraded archive has lost parity while its
+data is still readable. Run `bato -t` to verify the contents of a split archive.
+
+`archive --indexed` embeds the recovery index. With a password it also enables
+authenticated random access. Selective extraction reads the encrypted index
+and the chunks covering selected members, including any earlier duplicate
+data. Use `bato -t` with the password to verify every chunk. The index adds
+metadata and creation work. Indexed creation supports plain and whole-password
+archives. Splitting, partial protection, and checkpointed creation use the
+regular archive format. Indexed member extraction runs without checkpoints.
+
+A separate recovery index still works with an ordinary plain archive.
+Plain indexed extraction reads the compressed stream to verify its SHA-256
+before decoding the needed segments. Keep separate indexes in trusted storage.
+
+Checkpoint progress reports committed input and output bytes. Job status
+shows the saved offsets for public state and indicates when private state
+is encrypted.
+
+Multi-volume parity supports 2 to 16 parity volumes and up to 256 data
+and parity volumes combined. Each parity volume is as large as the longest
+data volume. Bato verifies per-volume hashes and the complete archive hash
+before extraction. The existing `--parity` option creates one parity volume.
+
+## Resources
+
+By default Bato uses all CPU capacity available to the process (`--threads 0`) and a managed allowance of 90% of usable RAM (`--memory-budget auto`). Operating-system, container and memory-admission limits remain active. Actual use depends on the work available.
+
+Segments are 64 MiB and chunks 256 KiB. For context-mixed segments the model keeps learning across chunks, and separate segments run in parallel. Independent copy, run, static-table and stored segments decode without adaptive training. Smaller segments (`--segment-size`) expose more parallel work but restart learning more often, which usually makes output larger.
+
+Bato has no default extraction byte cap or CLI runtime deadline.
+Other controls: `--threads N`, `--memory-budget auto|BYTES`, `--segment-size BYTES`, `--chunk-size BYTES`. `bato --help` lists them all.
+
+## Format
+
+Bato 0.7 keeps format 1.3 for the underlying compression stream. It uses a 10-byte header, packed block tags, canonical variable-length sizes, CRC32C checksums and a compact footer. The encoder tests reversible byte-delta and byte-plane filters for its independent representations; the context-mixing candidate retains automatic x86 call/jump rewriting. It compares complete block byte counts and stops context mixing early only when emitted bytes prove it cannot beat the current candidate. The optional password envelopes and volume index are versioned separately. See [docs/format.md](docs/format.md).
+
+Digit runs can also be separated from surrounding bytes. The encoder tests
+absolute values and two contextual integer predictors, packs small static ANS
+tables and copy commands, and selects this representation only when its full
+byte cost is smaller. Decoding reconstructs the original digit strings,
+including leading zeroes, without neural training. This uses byte patterns,
+not a JSON parser or filename detection. Other data retains the existing
+candidates, including context mixing.
+
+## Validation and measurement
+
+```bash
+cargo test
+cargo test --release
+python -m unittest discover -s scripts/tests -v
+python scripts/run_tests.py --bato-bin target/release/bato --timeout 180
+```
+
+Use `scripts/download_corpus.py`, `scripts/benchmark_suite.py` and `scripts/compare_benchmarks.py` for reproducible, verified measurements. Competitors run with the same CPU and process limits.
+
+```bash
+python scripts/benchmark_suite.py --corpus /path/to/corpus \
+  --frozen-workloads /path/to/frozen.json --codecs bato,zip,7z \
+  --bato-bin target/release/bato \
+  --mode rigorous --warmups 1 --repetitions 5
+```
+
+Freeze inputs and hashes before evaluating a change, verify every restored result, and report size, compression and decompression wall and CPU time, memory, failures and uncertainty together.
+
+The Python CLI suite exercises the selected Bato binary. Nested RAR and
+7z archives are frozen byte fixtures. Run historical Bato comparisons
+explicitly with the archive-operation benchmark in the
+[benchmark guide](docs/benchmark-iterations.md#bato-archive-operations).
+
+For file-size boundary testing around 2 GiB and 4 GiB, run the Python CLI
+suite with `BATO_MULTIGIB_STRESS=1` and at least 5 GiB of free temporary
+space. The real disk-exhaustion test requires Linux with permission to
+create a private mount namespace.
+
+## Benchmark results
+
+Bato 0.6 was measured alongside Brotli, XZ, 7-Zip, RAR, ZIP, and gzip.
+The tests used plain compression. Files were verified by SHA-256, and folder
+tests checked file bytes and directory structure. The same frozen input was
+used for every codec on each track.
+
+| Codec | Encoder version | Compression settings | Requested workers |
+| --- | --- | --- | ---: |
+| Bato | 0.6.0 | Single strongest mode, 64 MiB segments, 256 KiB chunks | 8 |
+| Brotli | 1.1.0 | `-q 11 --large_window=29` | 1 |
+| XZ | 5.4.5 | `-T8 -9 --extreme --no-adjust` | 8 |
+| 7-Zip | 23.01 | `-mx=9 -m0=LZMA2 -md=256m -mmt=8` | 8 |
+| RAR | 7.00 | Official encoder, RAR5 `-ma5 -m5 -md256m -mt8` | 8 |
+| ZIP | Info-ZIP 3.0 | Deflate `-9 -X` | 1 |
+| gzip | 1.12 | `-9 -n` | 1 |
+
+The 256 MiB dictionary request covers the full input of these cases.
+Actual dictionary size and parallel work depend on each codec and input.
+Both RAR and 7-Zip stored a 2 MiB dictionary for the JSON/log fixture.
+The host was an AMD EPYC 9V74 with an eight-CPU quota and an 8 GiB
+per-process cap. Bato's managed budget was 4,106,752,819 bytes.
+
+### Repeated JSON/log benchmark
+
+The 1,675,691-byte JSON/log file had one warm-up and five measured runs per
+codec. The table gives wall-clock medians and median absolute deviation (MAD).
+MB is decimal. The rows are ranked by compressed bytes, then decode time,
+then encode time.
+
+| Codec | Compressed bytes | Compressed MB | Encode s | Decode s | Decode MAD s | Peak encode / decode MiB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Bato 0.6 | 21,856 | 0.021856 | 9.971828 | 0.009887 | 0.000343 | 90.9 / 9.9 |
+| Brotli | 58,927 | 0.058927 | 3.026815 | 0.004476 | 0.000127 | 31.8 / 4.4 |
+| XZ | 60,660 | 0.060660 | 5.529935 | 0.008822 | 0.000192 | 21.0 / 5.4 |
+| 7-Zip | 93,343 | 0.093343 | 0.378054 | 0.011953 | 0.000607 | 29.1 / 7.0 |
+| RAR | 102,337 | 0.102337 | 0.080291 | 0.010213 | 0.000313 | 89.2 / 10.5 |
+| gzip | 114,357 | 0.114357 | 0.078619 | 0.008002 | 0.000333 | 2.0 / 1.8 |
+| ZIP | 114,463 | 0.114463 | 0.072624 | 0.009083 | 0.000116 | 3.2 / 3.1 |
+
+Bato was 62.9% smaller than the next-smallest archive (Brotli). Brotli had
+the fastest median decode. Across the 20 workload tracks with verified
+output from all seven codecs, Bato had the smallest archive on 13 and
+Brotli on seven.
+
+### Compressed size by workload
+
+Bold indicates the smallest verified output for the row. A dash means
+the codec did not finish and verify that case. The JSON/log row repeats the
+five-run result above. Each other row used one measured trial. Compressed
+bytes include the codec's archive or stream framing.
+
+#### Direct files
+
+| Workload | Input bytes | Bato 0.6 | Brotli | XZ | 7-Zip | RAR | ZIP | gzip |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| JSON/log records | 1,675,691 | **21,856** | 58,927 | 60,660 | 93,343 | 102,337 | 114,463 | 114,357 |
+| ELF executable | 1,156,904 | **305,994** | 371,075 | 366,120 | 365,502 | 380,161 | 455,603 | 455,499 |
+| Already-compressed gzip | 114,402 | **107,279** | 110,748 | 110,464 | 110,014 | 111,280 | 111,665 | 111,571 |
+| WAV audio | 32,044 | **113** | 353 | 516 | 252 | 493 | 668 | 564 |
+| PNG image | 186,695 | **136,915** | 180,037 | 182,752 | 183,743 | 185,810 | 186,710 | 186,606 |
+| Seeded random data | 1,048,576 | 1,048,602 | **1,048,582** | 1,048,696 | 1,048,761 | 1,048,722 | 1,048,860 | 1,048,754 |
+| Repeated English text | 1,106,000 | 111 | **74** | 372 | 420 | 252 | 3,962 | 3,860 |
+| enwik8 | 100,000,000 | — | — | — | — | **26,922,389** | 36,445,333 | 36,445,241 |
+| Synthetic HTTP access log | 33,554,565 | **204,720** | — | — | 2,304,198 | 4,618,021 | 5,828,792 | 5,828,680 |
+| Repeated text, 1 KiB | 1,024 | 107 | **76** | 160 | 206 | 154 | 204 | 108 |
+| Repeated text, 100 KiB | 102,400 | 102 | **78** | 236 | 283 | 200 | 561 | 461 |
+| Repeated text, 1 MiB | 1,048,576 | 112 | **78** | 368 | 417 | 227 | 3,770 | 3,668 |
+| Repeated text, 10 MiB | 10,485,760 | 115 | **79** | 1,744 | 1,800 | 642 | 35,793 | 35,689 |
+| Repeated text, 100 MiB | 104,857,600 | 211 | **158** | 15,472 | 15,538 | 4,743 | 356,003 | 355,897 |
+
+#### Native folder workflows
+
+Bato, 7-Zip, RAR, and ZIP use their native folder formats. Brotli, XZ, and
+gzip wrap TAR. Native timings include packaging and restoration when these
+are part of the workflow.
+
+| Workload | Input bytes | Bato 0.6 | Brotli | XZ | 7-Zip | RAR | ZIP | TAR.GZ |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Mixed directory | 4,235,331 | **1,437,828** | 1,554,798 | 1,548,312 | 1,578,513 | 1,606,361 | 1,703,333 | 1,707,224 |
+| Many small files | 204,833 | **1,690** | 1,800 | 1,832 | 2,187 | 10,605 | 32,383 | 3,522 |
+| Rust source tree | 354,160 | **55,925** | 71,209 | 73,332 | 72,711 | 78,812 | 105,187 | 86,287 |
+| Canterbury Corpus | 2,810,784 | **350,679** | 495,898 | 483,944 | 483,602 | 503,303 | 731,477 | 735,939 |
+| Silesia Corpus | 211,938,580 | — | — | — | — | **53,126,967** | 67,632,756 | 67,651,205 |
+
+#### Common-TAR folder workflows
+
+Every codec receives the same prebuilt TAR for a given folder. The input
+column shows the original folder payload, and compressed sizes include the
+encoded TAR. TAR preparation and verification are outside the codec timing.
+
+| Workload | Input bytes | Bato 0.6 | Brotli | XZ | 7-Zip | RAR | ZIP | gzip |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Mixed directory | 4,235,331 | **1,439,356** | 1,554,798 | 1,548,312 | 1,577,435 | 1,612,304 | 1,707,326 | 1,707,224 |
+| Many small files | 204,833 | **655** | 1,800 | 1,832 | 2,111 | 2,077 | 3,624 | 3,522 |
+| Rust source tree | 354,160 | **56,058** | 71,209 | 73,332 | 73,400 | 77,082 | 86,389 | 86,287 |
+| Canterbury Corpus | 2,810,784 | **350,828** | 495,898 | 483,944 | 484,999 | 507,048 | 736,041 | 735,939 |
+| Silesia Corpus | 211,938,580 | — | — | — | — | **53,123,539** | 67,651,307 | 67,651,205 |
+
+<details>
+<summary>Wall-clock encode and decode seconds by workload</summary>
+
+Each cell gives encode / decode seconds. Single trials are observations of
+these runs and small timing differences may vary on a repeat.
+
+#### Direct files
+
+| Workload | Bato 0.6 | Brotli | XZ | 7-Zip | RAR | ZIP | gzip |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| JSON/log records | 9.9718 / 0.0099 | 3.0268 / 0.0045 | 5.5299 / 0.0088 | 0.3781 / 0.0120 | 0.0803 / 0.0102 | 0.0726 / 0.0091 | 0.0786 / 0.0080 |
+| ELF executable | 9.0084 / 17.0681 | 2.8142 / 0.0087 | 0.3924 / 0.0264 | 0.1530 / 0.0267 | 0.0795 / 0.0185 | 0.1524 / 0.0149 | 0.1474 / 0.0109 |
+| Already-compressed gzip | 1.0561 / 1.7284 | 0.4835 / 0.0039 | 0.0733 / 0.0088 | 0.0160 / 0.0103 | 0.0144 / 0.0088 | 0.0064 / 0.0041 | 0.0061 / 0.0032 |
+| WAV audio | 0.0721 / 0.0048 | 0.0056 / 0.0022 | 0.0046 / 0.0032 | 0.0089 / 0.0054 | 0.0106 / 0.0078 | 0.0030 / 0.0033 | 0.0025 / 0.0024 |
+| PNG image | 1.4814 / 2.7942 | 1.2008 / 0.0069 | 0.1064 / 0.0160 | 0.0189 / 0.0143 | 0.0246 / 0.0147 | 0.0073 / 0.0065 | 0.0083 / 0.0041 |
+| Seeded random data | 9.3743 / 0.0069 | 0.3838 / 0.0048 | 0.3649 / 0.0039 | 0.0692 / 0.0081 | 0.1111 / 0.0073 | 0.0255 / 0.0075 | 0.0319 / 0.0068 |
+| Repeated English text | 0.1045 / 0.0076 | 0.0198 / 0.0040 | 0.0409 / 0.0055 | 0.0263 / 0.0079 | 0.0579 / 0.0113 | 0.0075 / 0.0066 | 0.0083 / 0.0054 |
+| enwik8 | — | — | — | — | 9.0518 / 0.5293 | 6.6185 / 0.6833 | 6.3903 / 0.6365 |
+| Synthetic HTTP access log | 46.5416 / 0.2259 | — | — | 19.6268 / 0.1745 | 2.6277 / 0.1364 | 1.5395 / 0.1428 | 1.5870 / 0.1380 |
+| Repeated text, 1 KiB | 0.0192 / 0.0168 | 0.0035 / 0.0022 | 0.0031 / 0.0030 | 0.0052 / 0.0068 | 0.0102 / 0.0062 | 0.0022 / 0.0030 | 0.0022 / 0.0020 |
+| Repeated text, 100 KiB | 0.6869 / 1.3177 | 0.0087 / 0.0029 | 0.0063 / 0.0032 | 0.0106 / 0.0055 | 0.0170 / 0.0095 | 0.0033 / 0.0048 | 0.0025 / 0.0027 |
+| Repeated text, 1 MiB | 0.0969 / 0.0054 | 0.0195 / 0.0048 | 0.0374 / 0.0045 | 0.0138 / 0.0075 | 0.0495 / 0.0082 | 0.0072 / 0.0066 | 0.0075 / 0.0141 |
+| Repeated text, 10 MiB | 0.1778 / 0.0195 | 0.3159 / 0.0194 | 0.3139 / 0.0251 | 0.0890 / 0.0259 | 0.3009 / 0.0405 | 0.0447 / 0.0402 | 0.0604 / 0.0355 |
+| Repeated text, 100 MiB | 1.2906 / 0.0893 | 4.5100 / 0.1979 | 3.1673 / 0.2515 | 0.6698 / 0.1735 | 1.9193 / 0.1296 | 0.4173 / 0.3373 | 0.4527 / 0.3389 |
+
+#### Native folders
+
+| Workload | Bato 0.6 | Brotli | XZ | 7-Zip | RAR | ZIP | TAR.GZ |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Mixed directory | 33.2568 / 62.4715 | 7.4414 / 0.0205 | 5.9613 / 0.0453 | 0.5587 / 0.0391 | 0.1675 / 0.0237 | 0.2722 / 0.0250 | 0.2885 / 0.0297 |
+| Many small files | 1.3876 / 2.3570 | 0.1419 / 0.0319 | 0.1984 / 0.0324 | 0.0154 / 0.0127 | 0.0449 / 0.0219 | 0.0063 / 0.0121 | 0.0369 / 0.0437 |
+| Rust source tree | 3.2614 / 5.1790 | 0.5226 / 0.0153 | 0.1862 / 0.0167 | 0.0474 / 0.0122 | 0.0561 / 0.0139 | 0.0205 / 0.0073 | 0.0479 / 0.0160 |
+| Canterbury Corpus | 20.8923 / 39.5798 | 4.9018 / 0.0187 | 1.7150 / 0.0394 | 0.4262 / 0.0348 | 0.1279 / 0.0184 | 0.6371 / 0.0207 | 0.6481 / 0.0239 |
+| Silesia Corpus | — | — | — | — | 15.3038 / 0.7456 | 19.7006 / 1.2048 | 19.6274 / 1.2686 |
+
+#### Common TAR
+
+| Workload | Bato 0.6 | Brotli | XZ | 7-Zip | RAR | ZIP | gzip |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Mixed directory | 30.2716 / 63.3168 | 7.5388 / 0.0145 | 6.4979 / 0.0362 | 0.5322 / 0.0359 | 0.2369 / 0.0350 | 0.2856 / 0.0270 | 0.2980 / 0.0350 |
+| Many small files | 2.2173 / 3.6706 | 0.1323 / 0.0034 | 0.1784 / 0.0042 | 0.0284 / 0.0068 | 0.0240 / 0.0083 | 0.0077 / 0.0042 | 0.0089 / 0.0031 |
+| Rust source tree | 3.3358 / 5.3346 | 0.5575 / 0.0036 | 0.1464 / 0.0068 | 0.0550 / 0.0095 | 0.0298 / 0.0094 | 0.0417 / 0.0052 | 0.0405 / 0.0089 |
+| Canterbury Corpus | 22.5285 / 38.5997 | 5.1187 / 0.0158 | 1.7221 / 0.0291 | 0.4696 / 0.0311 | 0.1510 / 0.0170 | 0.6245 / 0.0197 | 0.6467 / 0.0193 |
+| Silesia Corpus | — | — | — | — | 15.0703 / 0.6907 | 19.7996 / 1.3064 | 19.4392 / 1.1078 |
+
+</details>
+
+### Run records
+
+The phase timeouts were 180 seconds for JSON/log records, 120 seconds for
+the other local cases and Canterbury, and 60 seconds for Silesia, enwik8
+and the synthetic HTTP access log. Of 168 codec/workload/track cases,
+154 verified and 14 timed out during compression. Rankings include
+verified output only.
+
+- `2026-11-03T06-29-44.647946+00-00-afa0e2b5` for the repeated JSON/log comparison.
+- `2026-11-03T06-31-49.916393+00-00-62e698df` for the file and folder comparison.
+- `2026-11-03T06-40-09.578295+00-00-9184192c` for Silesia, enwik8, and the HTTP access log.
+
+| Workload | Track | Codec | Stage | Status |
+| --- | --- | --- | --- | --- |
+| enwik8 | direct | Brotli | compress | TIMEOUT |
+| Silesia Corpus | common-tar | Brotli | compress | TIMEOUT |
+| Silesia Corpus | native | XZ | compress | TIMEOUT |
+| Synthetic HTTP access log | direct | Brotli | compress | TIMEOUT |
+| Silesia Corpus | native | Brotli | compress | TIMEOUT |
+| enwik8 | direct | XZ | compress | TIMEOUT |
+| Silesia Corpus | common-tar | 7-Zip | compress | TIMEOUT |
+| enwik8 | direct | Bato 0.6 | compress | TIMEOUT |
+| Silesia Corpus | common-tar | Bato 0.6 | compress | TIMEOUT |
+| Silesia Corpus | common-tar | XZ | compress | TIMEOUT |
+| Silesia Corpus | native | Bato 0.6 | compress | TIMEOUT |
+| enwik8 | direct | 7-Zip | compress | TIMEOUT |
+| Silesia Corpus | native | 7-Zip | compress | TIMEOUT |
+| Synthetic HTTP access log | direct | XZ | compress | TIMEOUT |
+
+The tested Bato 0.6 binary was built from `d6c2622`. Its SHA-256 was
+`01774f788080227894e13354e33ac7dbd2653ab31d6d9d9cd14940c1841f3569`.
+The JSON/log fixture SHA-256 is
+`0cd430aa9192a136310540068e5fe913381094248c53f6d1259bb1f0225a01ee`.
+Bato's output is byte-identical to Bato 0.5 on that fixture. In the earlier
+five-run comparison, Bato 0.4 compressed it to 26,334 bytes and decoded it
+in a 21.487787 s median. Bato 0.5 produced 21,856 bytes and decoded in a
+0.009236 s median.
+
+<details>
+<summary>Frozen input hashes</summary>
+
+| Workload | SHA-256 |
+| --- | --- |
+| JSON/log records | `0cd430aa9192a136310540068e5fe913381094248c53f6d1259bb1f0225a01ee` |
+| Many small files | `3c48f0235370d5cdad081e739341b53a5e05a7bf3645fb6ecd21530b7a3391e6` |
+| Repeated text, 10 MiB | `414cf8db6bc936e43460b43916411d1c9ac1f7352978434e1d4d32225c416dd1` |
+| Already-compressed gzip | `f968acda7fbdee082ca7bc54c3e37ac996b0fabd26648c81ac9e4b5828499875` |
+| Repeated text, 100 KiB | `ee671f0d271e754ef86586ad12c206543eaa1a50a39c4caae3046f98d1e7e823` |
+| Repeated English text | `4a9a168a3711e29002ea66c2e9180170dd09daa517a9e84e3f7058088e4d7053` |
+| Canterbury Corpus | `641b3de455e148bc90952626f8dca06c92d29322025663ca74ceaf572568aa7d` |
+| Repeated text, 100 MiB | `3d9e54989cdeb32a81294d2e192bf95640e5a6abb961817daa033b8b8ebd4590` |
+| Repeated text, 1 KiB | `c2b1e9ba461a8c52ac75a717ea54eec2002b8430b14eb2c4d9468c67fdc7f85b` |
+| Mixed directory | `9e881d9a15c7fdccea3eafe62b79f5163578b0e5dc7a901ea233459fa672f327` |
+| PNG image | `29324b6fb1bcfa9b5c5d784d4788e44aa4483cbbfde435d9f16032dd3f5d0a6f` |
+| Rust source tree | `94d7e89551d80b6929d93535f335e3732c76b8271c25b40fb6425bc68376b383` |
+| ELF executable | `9d9769516a37741df5770461e3c0ed9d7b3591dd3e43d56d027bb5b4fe790818` |
+| Seeded random data | `e8f13cee87e82a0fe9c7e3fda3134442afc5fc199fcfe5999bb17b54574a3626` |
+| Repeated text, 1 MiB | `71f741e9c5f3ec27ecb9fe74b40a59def4abe190b54c9aa2291e045a7558f896` |
+| WAV audio | `4b112acb1891adafe7871fd9bb1c9138dfe1041a46cfd31edc2cb9c4d4c80441` |
+| Silesia Corpus | `ee2573b972dcd7e2466e3ed860e83c296eeb397e727f58cf8eb9fdfcad910229` |
+| enwik8 | `2b49720ec4d78c3c9fabaee6e4179a5e997302b3a70029f30f2d582218c024a8` |
+| Synthetic HTTP access log | `a304e2061473b7260ebb87f24a6533e1a2310abb3390451e165128e2ccb4ee3b` |
+
+</details>
+
+## Status
+
+Context-mixed blocks still require causal model updates during decoding.
+Earlier experiments on Silesia and enwik8 found zpaq `-m5` about 2–4% smaller.
+Those corpora were outside the Bato 0.5 speed rerun.
+# Bato format 1.3
+
+A `.bato` stream holds file bytes or a serialized directory tree. Bato 0.6
+accepts format 1.3 as its underlying compression stream.
+
+The stream is a 10-byte header, zero or more blocks, and a footer. Fixed-width
+integers are little-endian. Variable integers are canonical unsigned LEB128:
+seven value bits per byte, low group first, high bit set when another byte
+follows; redundant leading zero groups and values exceeding u64 are rejected.
+
+## Header
+
+| Offset | Bytes | Field |
+|---|---|---|
+| 0 | 4 | `BATO` |
+| 4 | 1 | Major `1` |
+| 5 | 1 | Minor `3` |
+| 6 | 1 | Flags: bit 0 directory archive; other bits zero |
+| 7 | 1 | Segment log2, 16..30 (default 26) |
+| 8 | 1 | CM chunk log2, 12..20, no greater than segment log2 (default 18) |
+| 9 | 1 | Model table-cap log2, 0..24 (default 22) |
+
+The version identifies the entire format, model, and transforms. Geometry is
+encoded once. Each segment is independent and has at most `2^segment_log2`
+original bytes; only the final segment may be shorter.
+
+## Blocks
+
+The first byte packs type in bits 0..2 and transform in bits 3..5. Bits 6..7
+must be zero, except the standalone end marker `255`. Original length `n`
+follows as a variable integer. Types 1, 3, 4, 5 and 7 then encode payload length
+`c` as a variable integer; it must be strictly smaller than `n`. The payload
+is followed by four bytes of CRC32C over the original, untransformed bytes.
+All lengths, segment boundaries and output limits are checked before payload
+allocation. Blocks cannot cross segment boundaries.
+
+| Type | Meaning | Payload |
+|---|---|---|
+| 0 | Raw CM chunk | Exactly `n` bytes; update history if a later CM coded chunk needs it |
+| 1 | Coded CM chunk | `c` bytes of arithmetic code |
+| 2 | Independent stored segment | Exactly `n` bytes, no model |
+| 3 | Independent literal/copy segment | `c` bytes of commands |
+| 4 | Independent static Huffman segment | `c` bytes of table and bits |
+| 5 | Huffman-coded literal/copy segment | Token-stream length variable integer, then static table and bits |
+| 6 | Repeated-byte segment | One byte repeated `n` times, `n >= 2` |
+| 7 | Contextual digit-run segment | Literal skeleton and integer streams |
+
+A segment holds either one independent block (2..7), or CM chunks (0..1).
+All nonfinal CM chunks have the geometry's full chunk length. A CM segment
+uses a single transform. Its model persists across chunks, including raw
+chunks; decoders can skip updates for an all-raw segment or a raw suffix
+after its final coded chunk. Models restart at segment boundaries.
+
+The encoder compares complete block bytes, including size fields and CRCs.
+It tries the untransformed independent representations and five reversible
+filters. The existing x86 selector admits an x86 candidate. Context mixing
+remains a candidate with its existing x86 decision. Early termination uses
+only emitted coder bytes and mandatory framing as a lower bound, never a
+sampled compression estimate. No filename, MIME routing, or quality modes
+are involved. Encoder search is not normative; decoding semantics are.
+
+### Literal/copy commands
+
+A command begins with variable integer `v`. If even, `v >> 1` is a nonzero
+literal length, followed by that many bytes. If odd, copy length is
+`(v >> 1) + 4`, followed by a variable integer distance. Distance must be
+nonzero and no greater than the already produced length. Overlapping
+copies repeat already decoded bytes. Commands must produce exactly `n`
+bytes with no trailing input. Decoder copies expand geometrically without
+per-byte prediction or training.
+
+### Static Huffman tables
+
+The table starts with a variable integer symbol count, 2..256, then pairs
+of symbol byte and code-length byte in strictly increasing symbol order.
+Lengths are 1..15 and must form a complete prefix tree. Codes are canonical:
+assign increasing codes by length then symbol. Their bits are emitted
+most-significant code bit first into the least-significant available stream
+bit. Unused high bits in the final byte are zero; trailing bytes and
+nonzero padding are rejected. The original size determines decoded length.
+For type 5 the prefixed length determines decoded token bytes, bounded by
+`n + 10`, and the token decoder must then produce exactly `n` original bytes.
+The decoder builds one lookup table; it does no adaptive training.
+
+### Coded CM payload
+
+The payload is a binary arithmetic code: 32-bit interval, 16-bit probabilities, byte renormalization and the shortest zero-padded final code point. The decoder checks the canonical prefix and the exact tail. Bit probabilities come from the context-mixing model in `src/core/cm`, which is the normative definition for this version:
+
+* hashed order 0–4 and 6 contexts and four word/line contexts, each a nibble bit-history map in a shared cache-line table;
+* an order-0 map, a byte-run model, a match model, a record-stride model and a bit-neighbourhood model;
+* two auxiliary experts with their own mixers: text (orders 5 and 7, word + previous byte, three words) and sparse structure (bytes 2, 3, 4 back and the 2/3 pair);
+* three first-layer mixers, a final mixer, three state-conditioned calibrators and three APMs.
+
+All arithmetic is integer, so every platform produces identical bytes.
+
+### Reversible transforms
+
+| ID | Transform |
+|---|---|
+| 0 | None |
+| 1 | x86 call/jump addresses |
+| 2 | Byte delta at distance 1 |
+| 3 | Byte delta at distance 2 |
+| 4 | Byte delta at distance 4 |
+| 5 | Byte-plane shuffle of 2-byte words |
+| 6 | Byte-plane shuffle of 4-byte words |
+| 7 | Reserved, rejected |
+
+Delta writes `out[i] = input[i] - input[i-distance]` modulo 256, using zero
+for positions before the start. Inverse adds restored preceding bytes.
+Shuffle groups byte 0 from each full word, then byte 1, and so on; an
+incomplete trailing word stays unchanged at the end. The inverse undoes
+this permutation. Filters operate within a segment and CRCs are verified
+after inversion.
+
+When a segment's call/jump sites repeat absolute targets far more often than relative operands, the encoder rewrites the segment before modeling. Every chunk of that segment carries transform `1`; a segment mixing transform values is corrupt. The rewrite goes over positions `i` from `len − 5` down to `0`: if byte `i` is `0xE8` or `0xE9` and byte `i + 4` is `0x00` or `0xFF`, the 24-bit value in bytes `i+1..=i+3` becomes `(value + i) mod 2^24`, with `i` counted from the segment start. The decoder applies the inverse in ascending order, `(value − i) mod 2^24` with the same site test, which is exact for every input. Chunk CRCs cover the original bytes and are checked after the inverse.
+
+## Footer
+
+The standalone byte `255`, canonical variable integer total original length,
+and four-byte CRC32C over the complete original output. Trailing bytes are
+rejected. Empty streams are 16 bytes. A stored segment adds one tag byte,
+one length variable integer and four CRC bytes; it has no payload-size field.
+
+## Directory archives (flag bit 0)
+
+The stream's decoded bytes are a catalogue of entries, each starting with a kind byte:
+
+| kind | layout | meaning |
+|---|---|---|
+| `1` | path length (u16) · path | directory |
+| `2` | path length (u16) · path · size (u64) · contents · CRC32C (u32) | file |
+| `3` | path length (u16) · path · size (u64) · id (u32) · CRC32C (u32) | file identical to the earlier file entry number `id`, stored once |
+| `0` | — | end of catalogue |
+
+Paths are UTF-8, use `/` separators, and are relative. Absolute paths, `..`, empty components, duplicates and names that would alias on the target filesystem are rejected. Extraction writes into a staging directory, enforces entry, path, metadata and output limits, verifies every checksum, and publishes the tree only after everything is valid.
+
+## Contextual digit-run representation (type 7)
+
+This is a reversible byte transform, without a file-format parser. Maximal
+ASCII decimal runs of 1..19 bytes become markers `0,1` in a literal skeleton.
+Longer digit runs remain literal. Literal zero bytes are escaped as `0,0`.
+The payload starts with variable integers for skeleton length, then one
+skeleton representation type (2..6), its payload length, and that payload.
+Nested type 7 is rejected. Skeleton output is bounded by twice original size.
+
+The context is the low eight bits of FNV-1a over at most eight immediately
+preceding original non-digit bytes, stopping at a digit or stream start.
+The seed is 2166136261 and multiplier 16777619. A variable integer context
+count (1..256) follows the skeleton. Entries occur in strictly increasing
+context-byte order. Each entry has context byte, predictor byte, then three
+bounded packets: low seven value bits, high value groups, leading-zero count.
+A context's low and zero-count streams have one byte per numeric run. The
+high stream is canonical ULEB128 for each value shifted right seven bits.
+
+Predictor 0 sends the absolute unsigned integer. Predictor 1 subtracts the
+last value of that context. Predictor 2 subtracts `2*last - previous`. All
+operations wrap modulo 2^64. Modes 1/2 map the residual by signed zigzag
+`(residual << 1) XOR (0 - (residual >> 63))`; mode 0 has no zigzag. Histories
+start at zero. Decoding reverses that mapping, restores the predictor,
+updates history, emits the indicated leading zeroes and canonical decimal
+digits, and rejects a resulting run longer than 19 bytes. Every packet
+must be consumed completely. Contexts are inferred from restored bytes.
+
+A packet is original length, one codec byte, payload length, payload. Codec
+0 is exact raw bytes; 1 repeats its one payload byte; 2 uses static rANS;
+3 uses literal/copy commands; 4 prefixes the command-stream length and then
+rANS-codes those commands. Command-stream output is bounded by packet length
+plus ten. Low-stream counts sum to at most ceil(original length / 2), since digit
+runs are maximal. High-stream output is bounded by nine bytes per number
+and, across contexts, twice the original length plus two bytes. All lengths are
+checked before allocation, and outer block/output limits and CRCs still apply.
+
+Static rANS uses scale 12, total frequency 4096, lower state 2^23 and byte
+renormalization. Its table is a variable integer symbol count (1..256), then
+ascending symbol byte and variable integer frequency-minus-one. Frequencies
+must sum exactly to 4096. The table is followed by a four-byte little-endian
+state in [2^23,2^31), then renormalization bytes. For slot `state & 4095`,
+the inverse update is `frequency * (state >> 12) + slot - cumulative`.
+Read bytes while the resulting state is below 2^23. The final state must be
+2^23 with no remaining payload. Frequencies are transmitted, so the decoder
+does not train a model. Encoder normalization and predictor choices are not
+part of the decoding contract. All choices compare complete serialized bytes.
+
+## Archive envelopes and split volumes
+
+Bato 0.6 adds separately versioned wrappers for directory archives. Plain
+`BATO` streams keep format 1.3 and the same encoded bytes. All wrapper
+integers are unsigned and little-endian.
+
+- `BAE1` is followed by one binary [age v1](https://c2sp.org/age) passphrase
+  payload containing the complete compressed Bato directory stream.
+- `BAP1` is followed by a u64 public stream length, the public Bato directory
+  stream, and one binary age v1 passphrase payload. The age plaintext contains
+  the 32-byte SHA-256 of the compressed public stream, a u16 protection scope
+  count, the scopes, and the private Bato directory stream. Each scope is a
+  u16 byte length and that many UTF-8 bytes in catalogue path syntax. A scope
+  includes the exact path and its descendants. The sections may share ancestor
+  directories. Full extraction authenticates the private stream and checks its
+  binding to the public stream before publishing files. Public-only extraction
+  verifies only the public Bato stream and any split-volume checksum.
+- A split archive is a directory with an `index.bato` file and the volume
+  directory named by that index. The index contains `BAV1`, a u64 maximum part
+  size, a u64 total archive size, the 32-byte SHA-256 of the complete archive, and
+  a 12-byte ASCII alphanumeric suffix. Volume files are named `part-0000001`
+  onward in `volumes-<suffix>`. Each part is the maximum size except the last
+  when there is a remainder. The assembled bytes form a plain or encrypted
+  directory archive as described above. Updates publish a new index only after
+  the complete replacement generation is written.
+
+Password envelopes use age's scrypt recipient with `N=2^17, r=8, p=1`.
+Encryption randomness is independent of Bato's deterministic compressor.
+
+## Checkpoints and recovery
+
+Bato 0.7 keeps the normal `BATO` 1.3 stream. A local `BAJ2` checkpoint
+records complete segment boundaries, accumulated CRC32C, and SHA-256
+identities for the source and staged output. Private checkpoint records use
+independent age X25519 payloads. The job identity is stored in an age
+passphrase envelope. These files are local job state and are separate from
+the finished archive.
+
+The optional `BAV2` split index uses the same fields as `BAV1`, followed
+by one 32-byte SHA-256 per numbered volume and a final SHA-256 for the
+`parity` file. The parity file is the bytewise XOR of all numbered volumes,
+with the shorter final data volume treated as zero-padded. The parity file
+length is the longest data volume length. The combined archive SHA-256
+must verify after reconstruction.
+
+A `BAR1` salvage index is generated by fully decoding and verifying an
+intact plain stream. It stores the original stream header, encoded and
+decoded segment lengths, per-segment CRC32C and SHA-256, and directory
+member paths and raw extents. A SHA-256 footer protects the index against
+accidental damage. Salvage validates each segment independently and uses
+the directory catalogue checks when restoring complete files.
+
+`BAV3` extends the split manifest with a parity count byte after the
+generation suffix, followed by the data-volume SHA-256 values and the
+parity-volume SHA-256 values. The parity files are named `parity-01` and
+onward. They are Reed-Solomon parity over GF(2⁸), with short data volumes
+zero-padded for coding. Data and parity use the systematic matrix of
+`reed-solomon-erasure` 6. Reads verify the assembled archive hash.
+
+`BAR2` extends `BAR1` with a 32-byte SHA-256 of the complete source archive
+immediately after its magic. Selective indexed extraction requires this
+binding. Salvage accepts both versions and can operate on a damaged source.
+
+### Embedded indexes
+
+`BAI1` contains a little-endian u64 BAR2 length, the complete BAR2 index, and
+the original directory stream to EOF. The BAR2 index binds the stream's
+SHA-256 and independently checks decoded segment SHA-256 values. Its size
+limit is 64 MiB.
+
+`BAE2` contains a single password-encrypted age v1 file to EOF. Its plaintext
+is the same body as BAI1, starting with the length. The age stream
+authenticates its header, encrypted chunks and final length. The reader seeks
+within the authenticated plaintext to reach selected Bato segments and
+verifies their decoded SHA-256 values from the encrypted BAR2 index. A
+selection verifies the index, final age chunk and chunks it reads. Full
+verification reads the entire stream and checks the BAR2 stream binding.
+# Reproducible Bato improvements
+
+Keep downloaded corpora, frozen manifests, benchmark databases, binaries,
+profiles, generated reports, and checkpoints in ignored directories such as
+`multi_corpus/` and `artifacts/`. The authoritative tools are
+`scripts/download_corpus.py`, `scripts/benchmark_suite.py`, and
+`scripts/compare_benchmarks.py`.
+
+The SQLite store uses full-synchronous rollback journaling under the existing
+host measurement lock. Before marking a run complete it checks database
+integrity, the planned case count, and every accepted fresh case's committed
+warmup and measured trial numbers. Preserve a damaged database and journals;
+start fresh measurements in a new ignored output directory rather than
+silently trusting an inconsistent projection.
+The comparison reader independently checks database integrity, accepted trial
+numbers, and the case projection against the committed trials. Schema-v4 JSON
+reports alone cannot establish a comparison: preserve the canonical database.
+If the environment replaces or damages a live database, retain the failure
+and use an unsynchronized temporary measurement directory, then back up the
+completed database and reports into an ignored directory. Do not repair lost
+observations by copying values from a report.
+
+## Freeze before evaluating
+
+Download and validate real data with the downloader. For example:
+
+```bash
+python3 scripts/download_corpus.py -o multi_corpus --target compression
+mkdir -p artifacts/iteration
+python3 scripts/benchmark_suite.py -c multi_corpus --mode rigorous --target canterbury \
+  --track both --workload both --list-workloads > artifacts/iteration/development.frozen.json
+python3 scripts/benchmark_suite.py -c multi_corpus --mode rigorous --target calgary \
+  --track both --workload both --list-workloads > artifacts/iteration/heldout.frozen.json
+```
+
+Declare the dataset split, manifest hashes, hardware, binary source revision,
+profile, CPU allocation, thread limits, memory limits, group size, seed,
+warmup/trial counts, timeout, and uncertainty rule in an ignored checkpoint.
+Tune only on development data. Evaluate held-out data after selecting each
+candidate; do not use its results to choose parser parameters. Synthetic
+fixtures are useful for corruption, bounds, and parity testing, but do not
+replace real-data measurements.
+
+For every registered asset, including the large tier, use the actual downloader
+with an explicit prepared-data budget, then audit the indexed files:
+
+```bash
+python3 scripts/download_corpus.py -o multi_corpus --all --tier extreme \
+  --jobs 8 --per-host 2 --extraction-jobs 2 --max-bytes 10000000000
+python3 scripts/download_corpus.py -o multi_corpus --audit-existing
+python3 scripts/benchmark_suite.py -c multi_corpus --mode rigorous --suite corpus \
+  --workload directories --track both --include-duplicates \
+  --max-file-bytes 8589934592 --max-directory-bytes 8589934592 \
+  --list-workloads > artifacts/iteration/full-collections.frozen.json
+```
+
+Whole collection directory workloads cover every indexed byte without
+sampling. Verify that their file paths and hashes exactly equal the index;
+record this scope distinctly from benchmarking every individual file. Keep
+duplicate files in the complete directory trees. Freeze the collection
+manifest and the development/held-out split before measurements.
+
+## Measure separately for each configuration
+
+Use `--check-tools` to preflight the actual installed tools and record
+versions. Missing RAR, KGB, or any other adapter must remain explicitly missing.
+The `high` profile applies 7z `-mx=9`, ZIP `-9`, RAR `-m5`, KGB `-9`,
+xz `-9 --extreme --no-adjust`, zstd `--ultra -22`, gzip `-9`, LZ4 `-12`,
+and bzip2 `-9`. These are tool settings, not evidence that a competitor's
+size is optimal for every input. Fast and default settings remain available
+as separate profiles; never compare unlike profiles silently.
+
+Example for one CPU and all available competitors at their highest settings:
+
+```bash
+python3 scripts/benchmark_suite.py -c multi_corpus --target canterbury \
+  --mode rigorous --track both --workload both \
+  --frozen-workloads artifacts/iteration/development.frozen.json \
+  --bato-bin artifacts/iteration/baseline --profile high \
+  --cpu-limit 1 --threads 1 --bato-modes cpu1 \
+  --bato-memory-budget 1073741824 \
+  --memory-budget 2147483648 --warmups 1 --repetitions 5 \
+  --timeout 120 --allow-unavailable --label baseline-cpu1
+```
+
+Save the printed run ID and binary hash. Repeat the exact settings with a
+candidate binary. Change `--cpu-limit`, `--threads`, and `--bato-modes`
+together for an equal-resource parallel track, e.g. eight allocated CPUs and
+`--bato-modes cpu`. Serial competitors remain serial within the same
+allocation; do not pretend their CLI supports thread settings it lacks.
+Bato has no GPU path. A GPU competitor (`--nncp-cuda`) is a separate
+hardware track and is never compared with CPU runs as if equal.
+
+Pass both `--large-warmups 1 --large-repetitions 5` as well as
+`--warmups 1 --repetitions 5` for the full suite. Large workloads must not
+silently use a single trial. The conservative scratch admission reserves five
+times the payload and per-file headers plus 64 MiB; free reproducible build and
+download temporaries after pinning binaries if necessary. Do not lower the
+admission factor to make a large workload pass. Resource failures and timeouts
+remain explicit results, never competitor wins. A Bato-only full-data run
+can validate engine changes, but does not replace the full competitor matrix.
+
+Native directory archives and a normalized common-tar input are separate
+tracks. External compression and tar packaging occur only in Python benchmark
+tooling. Every decompressed file, path, and directory, including empty
+directories, is verified before a trial is accepted. Common-tar trials verify
+the exact restored tar bytes, then safely extract that tar and compare every
+file and directory with the frozen source snapshot. These verification checks
+occur outside codec compression/decompression timing. Compression and
+decompression wall time, throughput, and isolated workflow CPU time have
+separate recorded scopes. Container construction is included in native
+workflow timing; common-tar construction is prepared outside encoder timing.
+
+## Compare and retain useful changes
+
+```bash
+python3 scripts/compare_benchmarks.py --baseline BASELINE_RUN_ID \
+  --candidate CANDIDATE_RUN_ID --competitors bato-v1
+```
+
+The output contains per-case comparisons and exclusion reasons. Exact stable
+bytes determine size wins. Timed wins or losses require a warmup, at least
+five fresh trials, a difference greater than 3%, and disjoint observed trial
+ranges. A 1 ms wall-time floor avoids claiming sub-millisecond differences
+as wins; CPU time has a 0.1 ms floor. Overlapping ranges are uncertain, not
+statistical confidence intervals. Small changes inside the tolerance are
+reported as ties. Run-to-run drift and the sequential evaluation order remain
+limitations even with this conservative rule.
+
+Use `--competitor-run PEER_RUN_ID --competitors bato-v1` (or one explicit
+parallel configuration) to reference existing competitor trials. The command
+requires identical hardware/harness identity, CPU allocation, requested threads,
+memory policy, profile, seed, timeout, and evaluation mode. It reads each peer's
+original committed trials and records both source run IDs. It does not copy
+observations into a new run. Failed, cached, short, missing, or incompatible
+trials cannot establish wins; at least one warmup and five verified fresh trials
+are still required. Only matching input bytes and tracks are compared.
+
+Back up the canonical database and frozen inputs durably before large workloads.
+An environment reset can erase both the workspace and temporary database. If
+the canonical database is lost, retain session observations as unconfirmed
+diagnostics and start a fresh generation; never reconstruct trial records from
+logs, summaries, or comparison projections. Re-downloaded Git metadata can
+change hashes even at a pinned revision, so re-audit and freeze the new index.
+
+GNU time child peak RSS and the isolated Python worker's peak RSS are
+individual process high-water marks. They are not a concurrent process-tree
+peak. Process-tree RSS samples are only a lower bound, and sampling is disabled
+when namespace PIDs do not match `/proc`. GPU VRAM (GPU competitors only) and
+energy stay unknown without reliable instruments. Resource unknowns cannot
+establish an efficiency win.
+
+Linux workflow I/O counters are read from `/proc/self/io` before and after the
+isolated phase, including waited-for children. Logical read/write bytes and
+syscall counts are distinct from storage-layer read bytes, page-dirtying write
+bytes, and cancelled write bytes. File-cache state is uncontrolled; these
+counters do not establish physical SSD/HDD traffic, latency, or energy. Unknown
+physical-device measurements remain unknown. See the kernel's
+[I/O accounting documentation](https://www.kernel.org/doc/html/latest/filesystems/proc.html).
+
+Bato `--stats` snapshots report admitted workers, coded blocks, estimated
+host memory, the memory budget and the managed peak reservation. They are
+engine accounting, not process RSS.
+
+After each retained change, checkpoint its source revision, binary hashes,
+commands, run IDs, manifest hashes, correctness/build results, comparison
+files, regressions, unmeasured metrics, and next experiment. Favorable averages
+do not establish the overall goal: require each declared configuration to win
+each workload and metric, and report every missing competitor and loss.
+
+## Diagnostics and next experiment
+
+`examples/cm_probe.rs` reports exact encoded sizes for complete frozen
+development files. It supplements the authoritative suite and never
+establishes a competitor win. The known gaps are summarized in the README
+status; profile the largest measured size gap first, declare each candidate before new trials, and measure fresh
+development trials before the full frozen and held-out evaluation.
+
+Selected codecs always receive fresh observations; competitor reuse reads original canonical runs via `--competitor-run`. Historical databases are preserved. A tooling change changes the recorded harness hash: old/new size comparisons remain available when inputs and settings match, but timing and competitor-reference comparisons require identical harness and resource conditions. Never rewrite old identities to bypass that check.
+
+## Correctness tests and competitor measurements
+
+Run the CLI correctness gate with the selected Bato binary.
+
+```bash
+python3 scripts/run_tests.py --bato-bin target/release/bato --timeout 180
+```
+
+Run competitor measurements as a separate command using a frozen corpus
+manifest and the strongest supported profile.
+
+```bash
+python3 scripts/benchmark_suite.py --corpus /path/to/corpus \
+  --frozen-workloads /path/to/frozen.json --codecs bato,zip,7z \
+  --bato-bin target/release/bato --profile high --mode rigorous \
+  --warmups 1 --repetitions 5
+```
+
+## Bato archive operations
+
+Run this track separately from compressor comparisons. It uses a deterministic
+synthetic tree, a same-size edit and a separate add payload. The manifest
+records the tree and content identities, operation set and controlled 64 KiB
+segment / 16 KiB chunk geometry. Preserve old manifests alongside the
+database. Generate a new versioned manifest when changing fixture semantics.
+
+```bash
+mkdir -p artifacts/archive-ops
+python3 scripts/benchmark_suite.py --archive-operations --list-workloads \
+  > artifacts/archive-ops/indexed-v1.json
+python3 scripts/benchmark_suite.py --archive-operations \
+  --frozen-workloads artifacts/archive-ops/indexed-v1.json \
+  --bato-bin target/release/bato --bato-revision HEAD \
+  --baseline-bato-bin /path/to/older/bato --baseline-bato-revision OLDER_SHA \
+  --bato-modes cpu1,cpu --warmups 1 --repetitions 5 \
+  --output-dir artifacts/archive-ops --scratch-dir /var/tmp \
+  --checkpoint-dir artifacts/archive-ops-checkpoint
+python3 scripts/compare_benchmarks.py --archive-operations \
+  --output-dir artifacts/archive-ops --baseline BASELINE_RUN --candidate CANDIDATE_RUN
+```
+
+Binary hashes identify measured builds. Revision arguments declare their source
+commits. Keep the exact binaries or record how they were built. Use
+`--archive-operation-format plain` on both manifest generation and campaign
+commands to compare older builds that lack indexed archives. Unsupported
+operations are recorded as such. Compare indexed and plain runs separately.
+
+The archive-operation tables share `measurements.sqlite3` with the existing
+benchmark schema. Trials are committed individually. A campaign left running
+in the database is incomplete. Start a new campaign after interruption.
+Preparation uses fresh copies of each build's verified starting archive.
+The command runs with an isolated temporary directory. The OS cache is
+uncontrolled. Scratch usage is unknown because short-lived files cannot be
+reliably measured after each command. The JSON comparison includes raw outcome
+labels and per-metric median, minimum, and maximum. Overlapping timing ranges
+are uncertain. For a later run on the same host, reuse the recorded worker
+and managed-memory settings with `--threads` and `--bato-memory-budget`
+if automatic resource detection resolves different values.
+
+The default CLI correctness run (also available as `--min`) includes the standard
+rules and ten verified corpus files: the two smallest distinct TXT, PDF, JPG,
+PNG, and MP4 inputs. It reads `~/data-research/corpus/.corpus.json`; override
+with `--corpus PATH`. Selection sorts by byte size then relative path, checks
+sizes and SHA-256 before testing, and rejects missing types or changed inputs.
+Each real-file check compresses, tests, restores, and compares exact bytes,
+printing original/compressed sizes and elapsed seconds. Controlled fixtures
+remain for corruption, malformed data, boundary sizes and recovery. Temporary
+outputs are removed and corpus files remain read-only. Before any Bato correctness test, the command registers the selected paths,
+hashes and original byte sizes in SQLite, then ensures verified competitor
+baselines for ZIP, gzip, 7z, RAR, PAQ8PX, CMIX and NNCP using the benchmark
+harness at its high profile, one warmup and five measured repetitions. Only
+missing compatible cases are measured; reused observations retain their original
+run IDs and dates. File bytes, codec identities, settings, hardware and limits
+must match, and committed lossless trials are required. Missing tools, failures
+or timeouts stop execution before the Bato tests. This gate never installs tools
+or silently lowers settings. Original baselines remain in their source runs;
+reference-only campaigns do not copy trials or appear as fresh measurements.
+`--database PATH` selects the database (default
+`~/data-research/measurements.sqlite3`), `--benchmark-output PATH` selects reports
+and scratch (default `~/data-research/test-results`), and
+`--competitor-timeout SECONDS` sets the measurement phase timeout (default 600).
+The Bato round trips remain correctness checks; their diagnostic elapsed times
+do not create new Bato benchmark observations.
+`--test NAME` runs only the selected existing rules and needs no corpus.
+Explicit `--min` cannot be combined with `--test` or `--extended`; an extended
+run also includes the ten real files.
+
+Use `scripts/run_tests.py --extended --timeout 900` for the 100,000-file admission
+check, 30,000-file edits, and multi-GiB restore cases. Run these separately from timed campaigns.
+# Working on Bato
+
+## Owner priorities (non-negotiable)
+1. **Order: compressed size > decompression time > compression time.** The
+   higher goal wins every conflict. No size loss for speed; no slower
+   decoding for faster encoding.
+2. **One mode, always the strongest.** No fast/balanced/selectable modes,
+   profiles, or header fields and options that can hold only one value.
+3. **Best size and best decompression time** against every tested
+   competitor. Target: smaller than paq8px at its strongest setting;
+   decompression as fast as possible, ZIP speed as the aspiration. Speed
+   work goes to decoding first and never costs size.
+4. **Report honestly:** name the competitor, data and margin of every loss.
+   Never claim an unmeasured win.
+
+## Repo map
+- `src/main.rs` CLI only · `src/lib.rs` public API · `src/core/types.rs`
+  format constants, options, errors.
+- `src/core/frame.rs` stream framing · `archive.rs` directory catalogue ·
+  `codec.rs` memory admission and worker pool · `safe_fs/` anchored output
+  and staged extraction · `memory/` budgets and platform probes.
+- `src/core/cm/` model: `predictor.rs` ensemble, `models/` experts
+  (order, word, match, record, neighbours), `mixer.rs`, `apm.rs`,
+  `isse.rs`, `simd.rs` kernels, `segment.rs` chunk coding, `x86.rs`
+  transform.
+- `docs/format.md` wire format · `docs/benchmark-iterations.md` measurement
+  procedure · `scripts/` benchmark tooling and its tests.
+
+## Engine
+- Pure Rust; never call another compressor inside Bato (competitors and tar
+  only in benchmark tooling).
+- No proprietary code or algorithms: nothing from closed-source, patented,
+  licence-restricted or reverse-engineered compressors (e.g. RAR, KGB
+  internals), and no code whose licence is incompatible with
+  `MIT OR Apache-2.0` (e.g. copying GPL paq8px/cmix source). Use only ideas
+  from public, unencumbered descriptions (papers, books, public-domain
+  specifications), implement them originally, and name the source in the
+  module's `Provenance:` header. Dependencies must be permissively licensed.
+- Universal byte archiver: accept any regular-file contents (empty, invalid
+  UTF-8, compressed, encrypted, unknown formats). Never choose a codec, or
+  reject input, by name, extension, MIME type or signature. Decisions follow
+  byte patterns and bounded costs; transforms keep the raw fallback and
+  count their metadata and CPU in selection.
+- Streams and directory archives are told apart by the header flag, never a
+  suffix. Default output names keep the complete source name. No silent
+  filename conversion; portable path restrictions live in `docs/format.md`.
+- Incompressible data is stored raw with bounded overhead; never claim every
+  input shrinks.
+- Bit-identical output on every platform and thread count: integer only
+  (enforced by `cm_sources_are_integer_only`), no RNG, clocks, floats,
+  hash-map order or scheduling-dependent results. Pseudo-random values come
+  only from fixed-seed integer hashes.
+- Keep checksums, bounded memory and output, path, symlink and device-file
+  safety, and staged extraction.
+- Multicore: independent segments run on all admitted workers. No GPU path
+  unless it is measured to improve size or decoding with identical bytes.
+- Development mode: no backward compatibility. Break the format freely, bump
+  the version in `src/core/types.rs`, update `docs/format.md`, and reject
+  unsupported data clearly. Delete legacy decoders and compatibility tests.
+
+## Resources
+- Default runs use `--threads 0 --memory-budget auto` (all CPUs, 90% of
+  usable RAM, 10% headroom). Benchmarks resolve and record these once;
+  `--resume` keeps them. Explicit limits are only for labelled controlled
+  tests.
+- Competitors get identical CPU and process limits, and every run needs
+  enough independent work for its workers. Segment geometry changes are a
+  different configuration; report them, never substitute them silently.
+
+## Workflow
+1. Read the code and `docs/format.md` first. Find the largest measured gap,
+   profile it, and make one focused change.
+2. Iterate on the frozen development manifest (Canterbury; Calgary is
+   held out; see `docs/benchmark-iterations.md`). Pilot files of at most
+   2 MiB each and at most 8 MiB in total, whole files only.
+3. Pass the gates below, then benchmark the candidate against the previous
+   best on identical hardware and settings.
+4. Keep a change only for a measured useful gain: compare the exact encoded
+   bytes and the extra compression and decompression CPU, and record the
+   regressions. A pure refactor must keep archives byte-identical.
+5. Commit and push each retained, verified improvement to `main` before the
+   next experiment, against the expected current `main` SHA, preserving
+   concurrent changes and file modes. Never force-push. Record source and
+   binary identities and accepted run IDs in the ignored checkpoint.
+   Rejected experiments stay off `main`: no feature flags or options for
+   inferior variants.
+6. Full evaluation only after the gates pass: frozen and held-out
+   manifests, `--mode rigorous --warmups 1 --repetitions 5` (large cases via
+   `--large-warmups`/`--large-repetitions`). First compare the manifest's
+   paths, file counts and bytes with the intended set; set directory caps
+   explicitly; label reduced coverage as partial.
+7. If blocked by the environment: checkpoint the source and binary
+   identities, commands, results and the next step; say the goal is
+   incomplete. Don't loop on setup.
+
+### Gates
+```bash
+cargo fmt --check && cargo clippy --release --all-targets
+cargo test --release
+python3 -m unittest discover -s scripts/tests
+python3 scripts/run_tests.py --bato-bin target/release/bato --timeout 180
+```
+Scalar/SIMD parity tests are part of `cargo test`. Correctness fixtures
+cover misleading names, all byte values, empty and duplicate files, nested
+compressed data and mixed trees, checking exact bytes and structure.
+For a refactor, also build the previous `main` as a reference, compress the
+development files with both binaries and `cmp` every archive.
+
+## Benchmarking
+- Use only `scripts/download_corpus.py`, `scripts/benchmark_suite.py` and
+  `scripts/compare_benchmarks.py`; extend them rather than adding parallel
+  tools. Don't re-download verified data.
+- Freeze dataset identities, hashes, roles and settings before evaluating:
+  `--list-workloads > …frozen.json`, then `--frozen-workloads`. Duplicates
+  of development data are not independent held-out evidence.
+- Competitors (paq8px, paq8l, zpaq, cmix, nncp, KGB, 7z, ZIP, RAR, xz, zstd,
+  gzip, LZ4, bzip2 where available): preflight with `--check-tools`, record
+  versions, and use the strongest supported profile (`--profile high`;
+  paq8px runs `-12L -lstmlayers=5`). Record resource-limited PAQ settings
+  explicitly; never substitute a lower level silently. GPU competitors
+  (`--nncp-cuda`) are a separate hardware track.
+- Run each competitor once per workload, profile, track, hardware and limits
+  as a baseline campaign; then reuse it with `compare_benchmarks.py
+  --competitor-run` while only Bato changes, reporting its run ID and date.
+  Never copy stored observations into new trials or present them as fresh.
+- During development run `benchmark_suite.py --codecs bato` only.
+- Verify every restored file and directory; delete temporary archives and
+  extraction trees but keep their measurements. Unavailable tools, failures,
+  timeouts and zero-exit partial archives are failures, not Bato wins
+  (`--allow-unavailable` records them as such).
+- Record size and ratio, compression and decompression wall and CPU time,
+  throughput, process-tree RAM, hardware, failures and uncertainty. VRAM,
+  energy and I/O only where instruments are reliable; otherwise "unknown".
+- Keep single-worker and all-worker runs (`--bato-modes cpu1,cpu`), native
+  and common-tar tracks separate; every setting goes in the run identity.
+  The tar track packages exactly the frozen members, revalidates after
+  packaging, rejects changed native inventories and keeps hidden files.
+  Nothing else may run during timed trials.
+- Report wins, ties, losses and uncertain results per workload and metric,
+  for one declared Bato configuration; never combine the best metrics from
+  different runs.
+- Datasets, reports, databases, binaries and checkpoints live in ignored
+  directories. Keep live scratch (`--scratch-dir`) outside synced folders;
+  mirror evidence with `--checkpoint-dir`.
+
+## Code quality (DRY, KISS, YAGNI)
+- One implementation per rule, constant and format detail; the encoder and
+  decoder share one model path (`Predictor::probability`/`observe`). Prefer
+  plain functions and data to single-use traits and generics. Build nothing
+  speculative.
+- Delete dead and commented-out code; no `#[allow(dead_code)]` and no unused
+  parameters. Test-only code is `#[cfg(test)]`.
+- Modules have one responsibility and stay under about 800 lines.
+- At most four parameters (otherwise use a struct); no boolean flag
+  parameters (use an enum); enums and newtypes instead of bare integers and
+  strings.
+- Named `const`s with unit and reason: format constants in `types.rs` or the
+  owning module, model tuning at the top of its model.
+- Nesting at most three levels; return early.
+- No mutable globals (only exception: the test heap observer in
+  `src/core/diagnostics.rs`). No `dyn Any` control flow. No
+  `unwrap`/`expect` on input-dependent library paths.
+- Every `unsafe` block has a `// SAFETY:` comment. SIMD and pointer code also
+  needs a test against the scalar or safe reference.
+- Never discard errors silently (`let _ =`, `.ok()`, `unwrap_or_default()`)
+  without a comment on that line saying why.
+- Methods that mutate say so in their name or docs. Getters, predicates,
+  `Display` and `Drop` do no I/O and no unrelated mutation.
+- `src/main.rs` only parses arguments, calls the library and prints.
+- Fix violations in code you touch; record larger ones as follow-up work.
+# Bato Requirements & Dependencies
+
+This document outlines all requirements and dependencies for developing, building, testing, and benchmarking the Bato compression engine.
+
+---
+
+## 1. Rust Compiler & Toolchain (Bato Engine)
+
+Bato's compression engine is implemented in pure Rust (2021 edition) with no external compressor dependencies.
+
+| Component | Minimum Version | Purpose |
+| :--- | :--- | :--- |
+| **rustc** | `1.89+` (see `rust-version` in `Cargo.toml`) | Rust compiler |
+| **cargo** | `1.89+` | Build manager & package manager |
+| **rustup** | Latest | Toolchain installer & target manager |
+| **musl target** *(optional)* | `x86_64-unknown-linux-musl` | Static, portable CPU-only builds |
+| **musl-tools** *(optional)* | Latest | C toolchain for musl target linking |
+
+### Installation
+
+```bash
+# Install Rust toolchain
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# Optional: Add musl target for portable CPU builds
+rustup target add x86_64-unknown-linux-musl
+sudo apt-get install -y musl-tools
+```
+
+---
+
+## 2. Python Environment (Scripts & Benchmarks)
+
+Bato's benchmarking, corpus management, and verification scripts live in `scripts/`. They are strictly designed to run on the standard library with zero mandatory third-party packages.
+
+| Component | Minimum Version | Purpose |
+| :--- | :--- | :--- |
+| **python3** | `3.8+` (tested with `3.14`) | Runs benchmark runner, corpus downloader, and verification |
+| **Standard Library** | Built-in | `argparse`, `json`, `sqlite3`, `pathlib`, `struct`, `urllib`, `tarfile`, `zipfile`, `unittest`, `dataclasses` |
+| **pytest / ruff** *(optional)* | Latest | Optional testing and linting tools |
+
+---
+
+## 3. External Archiver Competitors (Benchmark Suite)
+
+Bato's evaluation suite compares Bato against industry-standard compressors under identical execution profiles (`fast`, `default`, `high` / `extreme`).
+
+### Standard Package Competitors
+
+These can be installed directly through system package managers:
+
+| Codec | Binary / Command | Debian / Ubuntu Package | Notes |
+| :--- | :--- | :--- | :--- |
+| **7-Zip** | `7zz` or `7z` | `p7zip-full` | High profile uses `-mx=9` |
+| **ZIP** | `zip` & `unzip` | `zip`, `unzip` | Native info-zip (Python fallback if absent) |
+| **Gzip** | `gzip` | `gzip` | Standard DEFLATE `-9` |
+| **Bzip2** | `bzip2` | `bzip2` | Burrows-Wheeler `-9` (Python fallback if absent) |
+| **XZ** | `xz` | `xz-utils` | LZMA2 `--extreme -9` |
+| **Zstandard** | `zstd` | `zstd` | `--ultra -22` |
+| **LZ4** | `lz4` | `lz4` | `-12` |
+| **Tar** | `tar` | `tar` | Used for common-tar comparison tracks |
+| **ZPAQ** | `zpaq` | `zpaq` | Journaling archiver `-method 5` |
+
+### Specialized Competitors
+
+| Codec | Binary | Source / Notes |
+| :--- | :--- | :--- |
+| **RAR** | `rar` | Official CLI from [RARLAB](https://www.rarlab.com/download.htm) (`unrar` alone cannot compress) |
+| **KGB** | `kgb` | KGB Archiver v1.0 CLI (PAQ-based) |
+| **PAQ8L** | `paq8l` | Matt Mahoney PAQ8L executable placed on `PATH` |
+| **PAQ8PX** | `paq8px` | Jan Ondrus PAQ8PX executable placed on `PATH` |
+
+---
+
+## 4. Verification
+
+You can verify which tools are present and ready on your system at any time by running:
+
+```bash
+# Check status of all benchmark competitors
+python3 scripts/benchmark_suite.py --check-tools --allow-unavailable
+
+# Run Bato's Rust and Python test suite
+cargo test
+python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+```
+
+---
+
+## 5. Quick Setup for Debian / Ubuntu
+
+```bash
+# 1. System packages & standard archivers
+sudo apt-get update && sudo apt-get install -y \
+    build-essential \
+    musl-tools \
+    python3 \
+    p7zip-full \
+    zip \
+    unzip \
+    gzip \
+    bzip2 \
+    xz-utils \
+    zstd \
+    lz4 \
+    tar \
+    zpaq \
+    kgb
+
+# 2. Rust toolchain
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+rustup target add x86_64-unknown-linux-musl
+```
+
+
+### Optional extreme neural/context-mixing competitors
+
+- **CMIX**: build [byronknoll/cmix](https://github.com/byronknoll/cmix), executable `cmix` on PATH; at least 32 GiB RAM recommended. Single-file input and no common `-9` quality switch.
+- **NNCP**: obtain [Bellard NNCP v3.3](https://bellard.org/nncp/), executable `nncp` on PATH; the benchmark uses CPU and `--profile default` unless explicitly configured. For supported NVIDIA GPUs use `--nncp-cuda`; the `enwik8/enwik9` profiles are text-specific.
+- **PAQ8PX and ZPAQ** were already supported; PAQ8PX high can exceed 32 GiB. All four must pass independent capability round-trip checks before results are accepted.
+
+`python3 scripts/benchmark_suite.py --check-tools --codecs cmix,nncp,paq8px,zpaq --tool-check-timeout 600 --allow-unavailable`
+
+Use `--memory-budget` for the process address-space cap, `--timeout` for each measured phase, and `--nncp-profile` to explicitly freeze NNCP model choice. Missing GPU, peak process RAM, or timing data remain unknown, not performance wins.
+#include <iostream>
+#include <map>
+#include <string>
+#include <vector>
+#include <algorithm>
+
+namespace shapes {
+
+class Shape {
+public:
+    virtual ~Shape() = default;
+    virtual double area() const = 0;
+    virtual std::string name() const { return "shape"; }
+};
+
+class Circle : public Shape {
+public:
+    explicit Circle(double radius) : radius_(radius) {}
+    double area() const override { return 3.14159265358979 * radius_ * radius_; }
+    std::string name() const override { return "circle"; }
+private:
+    double radius_;
+};
+
+}  // namespace shapes
+
+int main(int argc, char *argv[]) {
+    std::vector<std::string> words;
+    std::map<std::string, int> counts;
+    for (int i = 1; i < argc; ++i) {
+        words.push_back(argv[i]);
+        ++counts[argv[i]];
+    }
+    std::sort(words.begin(), words.end());
+    for (const auto &entry : counts) {
+        std::cout << entry.first << ": " << entry.second << std::endl;
+    }
+    return 0;
+}
+
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader};
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Token {
+    Number(f64),
+    Word(String),
+    Symbol(char),
+}
+
+pub fn tokenize(line: &str) -> Vec<Token> {
+    let mut tokens = Vec::new();
+    for part in line.split_whitespace() {
+        if let Ok(value) = part.parse::<f64>() {
+            tokens.push(Token::Number(value));
+        } else if part.chars().all(|c| c.is_alphanumeric()) {
+            tokens.push(Token::Word(part.to_string()));
+        } else {
+            tokens.extend(part.chars().map(Token::Symbol));
+        }
+    }
+    tokens
+}
+
+fn main() -> io::Result<()> {
+    let file = File::open("input.txt")?;
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for line in BufReader::new(file).lines() {
+        for token in tokenize(&line?) {
+            if let Token::Word(word) = token {
+                *counts.entry(word).or_insert(0) += 1;
+            }
+        }
+    }
+    println!("{} distinct words", counts.len());
+    Ok(())
+}
+
+interface User {
+  id: number;
+  name: string;
+  email?: string;
+}
+
+export async function fetchUsers(url: string): Promise<User[]> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Request failed: ${response.status}`);
+  }
+  const data = (await response.json()) as User[];
+  return data.filter((user) => user.name.length > 0);
+}
+
+<?php
+require_once __DIR__ . '/vendor/autoload.php';
+
+function render($template, array $vars = []) {
+    extract($vars);
+    ob_start();
+    include $template;
+    return ob_get_clean();
+}
+
+$name = isset($_GET['name']) ? htmlspecialchars($_GET['name']) : 'world';
+echo "<h1>Hello, {$name}!</h1>";
+
+class Account
+  attr_reader :balance
+
+  def initialize(balance = 0)
+    @balance = balance
+  end
+
+  def deposit(amount)
+    raise ArgumentError, "amount must be positive" unless amount.positive?
+    @balance += amount
+  end
+end
+
+account = Account.new(100)
+account.deposit(50)
+puts "Balance: #{account.balance}"
+
+version: "3.8"
+services:
+  web:
+    image: nginx:latest
+    ports:
+      - "80:80"
+    volumes:
+      - ./html:/usr/share/nginx/html:ro
+    depends_on:
+      - app
+  app:
+    build: .
+    environment:
+      - DATABASE_URL=postgres://user:secret@db:5432/app
+      - DEBUG=false
+  db:
+    image: postgres:15
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+volumes:
+  dbdata: {}
+
+name: CI
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: npm ci
+      - name: Run tests
+        run: npm test
+
+FROM python:3.11-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+EXPOSE 8000
+CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
+
+id,name,department,salary,start_date
+1,Alice Johnson,Engineering,85000,2019-03-15
+2,Bob Smith,Marketing,62000,2020-07-01
+3,Carol White,Engineering,91000,2018-11-20
+4,David Brown,Sales,58000,2021-01-10
+5,Eve Davis,Support,47000,2022-05-23
+
+# Project title
+
+A short description of the project and what it does.
+
+## Installation
+
+```
+git clone https://example.com/project.git
+cd project
+make install
+```
+
+## Usage
+
+Run `project --help` to see the available options. Contributions are welcome:
+please open an issue first to discuss what you would like to change.
+
+## License
+
+Released under the MIT License. See the LICENSE file for details.
+
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  font: 16px/1.5 "Helvetica Neue", Arial, sans-serif;
+  background: #fafafa;
+  color: #222;
+}
+.container { width: 90%; max-width: 960px; margin: 0 auto; }
+.button {
+  display: inline-block;
+  padding: 8px 16px;
+  border: 1px solid #0066cc;
+  border-radius: 4px;
+  background-color: #0066cc;
+  color: white;
+  text-decoration: none;
+}
+.button:hover { background-color: #0052a3; }
+@media (max-width: 600px) { .container { width: 100%; } }
+
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Example News</title>
+    <link>https://news.example.com/</link>
+    <description>Latest headlines</description>
+    <item>
+      <title>First story</title>
+      <link>https://news.example.com/1</link>
+      <pubDate>Mon, 01 Jan 2024 09:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>
+
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100">
+  <circle cx="50" cy="50" r="40" stroke="black" stroke-width="3" fill="red"/>
+  <rect x="10" y="10" width="30" height="30" fill="none" stroke="blue"/>
+  <path d="M 10 80 Q 50 20 90 80" stroke="green" fill="transparent"/>
+</svg>
+
+\documentclass[11pt]{article}
+\usepackage{amsmath}
+\begin{document}
+\section{Introduction}
+Let $f(x) = x^2 + 1$. Then the derivative is $f'(x) = 2x$, and
+\begin{equation}
+  \int_0^1 f(x)\,dx = \frac{4}{3}.
+\end{equation}
+\end{document}
+
+diff --git a/src/main.c b/src/main.c
+index 83db48f..bf2a9c1 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -10,7 +10,7 @@ int main(void)
+ {
+     int count = 0;
+-    while (count < 10) {
++    while (count < 20) {
+         printf("%d\n", count);
+         count++;
+     }
+
+[database]
+host = localhost
+port = 5432
+user = admin
+password = changeme
+
+[logging]
+level = info
+file = /var/log/app.log
+
+#!/usr/bin/perl
+use strict;
+use warnings;
+my %seen;
+while (my $line = <STDIN>) {
+    chomp $line;
+    next if $line =~ /^\s*(#|$)/;
+    my ($key, $value) = split /=/, $line, 2;
+    $seen{$key}++;
+    print "$key => $value\n";
+}
+print scalar(keys %seen), " keys\n";
+
+program Counter;
+var
+  i, total: integer;
+begin
+  total := 0;
+  for i := 1 to 10 do
+    total := total + i * i;
+  writeln('Sum of squares: ', total);
+end.
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class Inventory {
+    private final List<String> items = new ArrayList<>();
+
+    public void add(String item) {
+        if (item == null || item.isEmpty()) {
+            throw new IllegalArgumentException("item must not be empty");
+        }
+        items.add(item);
+    }
+
+    public int size() {
+        return items.size();
+    }
+}
+
+#!/bin/bash
+# backup.sh - copy the home directory to an external disk
+SRC="$HOME"
+DEST="/mnt/backup/$(date +%Y-%m-%d)"
+mkdir -p "$DEST" || exit 1
+rsync -a --delete --exclude='.cache' "$SRC/" "$DEST/"
+if [ $? -ne 0 ]; then
+    echo "backup failed" >&2
+    exit 1
+fi
+echo "backup finished: $DEST"
+
+Apache License
+Version 2.0, January 2004
+http://www.apache.org/licenses/
+
+TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+1. Definitions.
+
+"License" shall mean the terms and conditions for use, reproduction, and distribution as defined by Sections 1 through 9 of this document.
+
+"Licensor" shall mean the copyright owner or entity authorized by the copyright owner that is granting the License.
+
+"Legal Entity" shall mean the union of the acting entity and all other entities that control, are controlled by, or are under common control with that entity.
+
+Unless required by applicable law or agreed to in writing, Licensor provides the Work (and each Contributor provides its Contributions) on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied, including, without limitation, any warranties or conditions of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A PARTICULAR PURPOSE.
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define MAX_LINE 1024
+
+typedef struct node {
+    int value;
+    struct node *next;
+} node_t;
+
+static node_t *push(node_t *head, int value)
+{
+    node_t *n = malloc(sizeof(node_t));
+    if (n == NULL) {
+        fprintf(stderr, "out of memory\n");
+        exit(1);
+    }
+    n->value = value;
+    n->next = head;
+    return n;
+}
+
+int main(int argc, char **argv)
+{
+    char line[MAX_LINE];
+    node_t *head = NULL;
+    int i, total = 0;
+
+    for (i = 1; i < argc; i++) {
+        head = push(head, atoi(argv[i]));
+    }
+    while (fgets(line, sizeof(line), stdin) != NULL) {
+        if (strlen(line) > 1) {
+            head = push(head, atoi(line));
+        }
+    }
+    for (node_t *p = head; p != NULL; p = p->next) {
+        total += p->value;
+    }
+    printf("total = %d\n", total);
+    return 0;
+}
+
+import os
+import sys
+import json
+import argparse
+
+
+class Counter:
+    """Counts words in text files."""
+
+    def __init__(self, path):
+        self.path = path
+        self.counts = {}
+
+    def run(self):
+        with open(self.path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                for word in line.lower().split():
+                    self.counts[word] = self.counts.get(word, 0) + 1
+        return self.counts
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="count words")
+    parser.add_argument("files", nargs="+")
+    parser.add_argument("--top", type=int, default=10)
+    args = parser.parse_args(argv)
+    for name in args.files:
+        if not os.path.isfile(name):
+            print("not a file: %s" % name, file=sys.stderr)
+            continue
+        counts = Counter(name).run()
+        best = sorted(counts.items(), key=lambda item: -item[1])[: args.top]
+        print(json.dumps({"file": name, "top": best}, indent=2))
+
+
+if __name__ == "__main__":
+    main()
+
+function debounce(callback, delay) {
+  let timer = null;
+  return function (...args) {
+    clearTimeout(timer);
+    timer = setTimeout(() => callback.apply(this, args), delay);
+  };
+}
+
+const items = document.querySelectorAll(".item");
+items.forEach((item, index) => {
+  item.addEventListener("click", () => {
+    console.log(`clicked item ${index}`);
+    item.classList.toggle("active");
+  });
+});
+
+async function load(url) {
+  const response = await fetch(url, { headers: { Accept: "application/json" } });
+  if (!response.ok) {
+    throw new Error("request failed with status " + response.status);
+  }
+  return response.json();
+}
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Example page</title>
+  <link rel="stylesheet" href="style.css">
+  <style>
+    body { margin: 0; font-family: Arial, Helvetica, sans-serif; color: #333; }
+    .header { background-color: #f5f5f5; padding: 10px 20px; border-bottom: 1px solid #ddd; }
+    .content { max-width: 800px; margin: 0 auto; }
+    a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>Welcome</h1>
+    <ul class="menu">
+      <li><a href="index.html">Home</a></li>
+      <li><a href="about.html">About</a></li>
+      <li><a href="contact.html">Contact</a></li>
+    </ul>
+  </div>
+  <div class="content">
+    <p>This is a paragraph with <strong>bold text</strong> and a <a href="https://example.com/">link</a>.</p>
+    <table border="1">
+      <tr><th>Name</th><th>Value</th></tr>
+      <tr><td>alpha</td><td>1</td></tr>
+      <tr><td>beta</td><td>2</td></tr>
+    </table>
+  </div>
+  <script src="main.js"></script>
+</body>
+</html>
+
+{
+  "name": "example-package",
+  "version": "1.2.3",
+  "description": "A small example",
+  "main": "index.js",
+  "scripts": { "test": "jest", "build": "tsc --project tsconfig.json" },
+  "dependencies": { "express": "^4.18.2", "lodash": "^4.17.21" },
+  "devDependencies": { "typescript": "^5.0.0" },
+  "repository": { "type": "git", "url": "https://github.com/example/example.git" },
+  "license": "MIT",
+  "keywords": ["example", "package", "json"],
+  "enabled": true,
+  "ratio": 0.75,
+  "items": [ { "id": 1, "tags": [] }, { "id": 2, "tags": ["a", "b"] }, null ]
+}
+
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration xmlns="http://example.com/schema" version="2.0">
+  <settings>
+    <setting name="timeout" value="30"/>
+    <setting name="retries" value="3"/>
+  </settings>
+  <servers>
+    <server id="main" host="localhost" port="8080">
+      <description>The main server</description>
+    </server>
+  </servers>
+</configuration>
+
+SELECT customers.name, orders.total, orders.created_at
+FROM customers
+JOIN orders ON orders.customer_id = customers.id
+WHERE orders.total > 100 AND orders.status = 'paid'
+GROUP BY customers.name
+ORDER BY orders.total DESC
+LIMIT 20;
+
+CREATE TABLE users (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  email TEXT UNIQUE,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+#!/bin/sh
+set -e
+for file in *.txt; do
+  if [ -f "$file" ]; then
+    echo "processing $file"
+    gzip -9 -c "$file" > "$file.gz"
+  fi
+done
+echo "done"
+
+package main
+
+import (
+	"fmt"
+	"os"
+	"strings"
+)
+
+type Server struct {
+	Name string
+	Port int
+}
+
+func (s *Server) String() string {
+	return fmt.Sprintf("%s:%d", s.Name, s.Port)
+}
+
+func main() {
+	servers := []*Server{{"alpha", 8080}, {"beta", 9090}}
+	for i, s := range servers {
+		fmt.Println(i, s, strings.ToUpper(s.Name))
+	}
+	if len(os.Args) > 1 {
+		os.Exit(1)
+	}
+}
+
+public class Greeter {
+    private final String name;
+
+    public Greeter(String name) {
+        this.name = name;
+    }
+
+    public String greet() {
+        return "Hello, " + name + "!";
+    }
+
+    public static void main(String[] args) {
+        for (String arg : args) {
+            System.out.println(new Greeter(arg).greet());
+        }
+    }
+}
+
+(defun factorial (n)
+  "Return the factorial of N."
+  (if (<= n 1)
+      1
+    (* n (factorial (- n 1)))))
+
+(defun map-list (function items)
+  (cond ((null items) nil)
+        (t (cons (funcall function (car items))
+                 (map-list function (cdr items))))))
+
+[package]
+name = "example"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+
+# Makefile
+CC = gcc
+CFLAGS = -O2 -Wall -Wextra
+all: program
+program: main.o util.o
+	$(CC) $(CFLAGS) -o $@ $^
+%.o: %.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+clean:
+	rm -f *.o program
+
+2024-03-01 12:00:01 INFO  server started on port 8080
+2024-03-01 12:00:05 WARN  slow request: GET /index.html took 1532 ms
+2024-03-01 12:00:09 ERROR connection reset by peer (192.168.0.12:51234)
+127.0.0.1 - - [01/Mar/2024:12:00:10 +0000] "GET /favicon.ico HTTP/1.1" 404 209 "-" "Mozilla/5.0"
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions: The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+LONDON (Reuters) - British shares rose on Monday as investors welcomed better than expected figures on manufacturing, while a rally in mining companies helped the main index to its highest close in three weeks. The benchmark index ended 0.8 percent higher at 7,412 points, with banks and energy producers among the strongest performers. Analysts said that the data pointed to a slow but steady recovery, although several warned that rising prices and higher borrowing costs could still weigh on growth later in the year. "The numbers are encouraging, but nobody should get carried away," said one fund manager in the City.
+
+Abstract. We study the effect of temperature on the growth rate of a common soil bacterium under laboratory conditions. Cultures were grown at twelve temperatures between 5 and 45 degrees Celsius, and the optical density was measured every thirty minutes for three days. The growth rate increased roughly linearly up to 32 degrees, reached a maximum at 37 degrees, and fell sharply above 40 degrees. These results are consistent with earlier work on related species and suggest that the enzyme responsible for cell wall synthesis is the limiting factor at high temperature. Further experiments are needed to test this hypothesis.
+
+Hi Tom, just a quick note to say that the meeting on Thursday has been moved to 2 pm because the conference room is booked in the morning. Could you please send me the slides before then, so that I can print a few copies? Also, Sarah asked whether you could bring the budget spreadsheet. If you have any questions, call me on my mobile. Thanks a lot, and see you on Thursday. Best regards, Anna
+
+1. Preheat the oven to 180 degrees. 2. Peel and chop the onions and the garlic. 3. Heat two tablespoons of olive oil in a large pan, add the onions, and cook gently for ten minutes until soft. 4. Add the garlic, the tomatoes and a pinch of salt, and simmer for twenty minutes. 5. Pour the sauce over the cooked pasta, sprinkle with cheese and bake for fifteen minutes. Serves four. Preparation time: 20 minutes. Cooking time: 45 minutes.
+
+Marie Curie was born in Warsaw in 1867 and moved to Paris in 1891 to study physics and mathematics. Together with her husband Pierre she discovered the elements polonium and radium, and in 1903 the two shared the Nobel Prize in Physics with Henri Becquerel. After her husband's death in 1906 she took over his professorship at the Sorbonne, becoming the first woman to teach there. In 1911 she received a second Nobel Prize, this time in Chemistry. She died in 1934 of a disease caused by long exposure to radiation.
+
+Section 4. Termination. Either party may terminate this agreement at any time by giving the other party thirty days' written notice. In the event of a material breach, the non-breaching party may terminate the agreement immediately if the breach is not remedied within fourteen days of notice. Upon termination, all licenses granted under this agreement shall end, and each party shall return or destroy any confidential information belonging to the other party. Sections 5, 7 and 9 shall survive termination.
+
+The weather forecast for tomorrow: mostly cloudy in the morning with scattered showers in the north and west, becoming brighter in the afternoon. Temperatures will reach a high of 14 degrees in the south and 9 degrees in the north. Winds will be light to moderate, mainly from the southwest. Tonight will be clear and cold, with a risk of frost in rural areas. The outlook for the weekend is dry and sunny, although it will remain cool.
+
+I bought this vacuum cleaner two months ago and I am very happy with it. It is light, quiet, and picks up pet hair from the carpet without any trouble. The battery lasts about forty minutes, which is enough for my whole flat. The only small complaint is that the dust container is a bit difficult to empty. Would recommend to anyone with a cat or a dog. Five stars. Update: after six months it still works perfectly.
+
+"Where are you going?" asked the boy. "To the river," said his sister, tying her scarf. "Mother says we need water for the evening, and the well is dry again." He looked at the sky, which had turned the colour of old iron, and then at the road, which was already empty. "It will rain before you get back," he said. She shrugged. "Then I shall be wet." And she took the two buckets from the hook by the door and went out into the wind.
+
+Chapter 3. The early years. By the middle of the eighteenth century the town had grown into one of the busiest ports on the coast. Merchants from the north brought timber, iron and furs; ships from the south unloaded wine, salt and cloth. The old harbour was too small for the traffic, and in 1762 the council voted to build a new quay and a customs house. The work took eleven years and cost more than three times the original estimate, a fact that was long remembered by the citizens who had to pay for it through higher taxes.
+
+Q. Does the warranty cover accidental damage? A. No, the standard warranty covers only defects in materials and workmanship for a period of two years from the date of purchase. Accidental damage, such as drops or spills, may be covered by the optional protection plan. Q. How do I register my product? A. Visit our website, click on Support, and enter the serial number printed on the bottom of the device. Registration takes less than two minutes.
+
+lol i cant believe he said that. anyway are we still on for saturday? i can bring the games if you want, and maybe some snacks. let me know what time works for everyone. also dont forget to tell jake that the party is at my place now, not at the park. see ya!
+
+The first law of thermodynamics states that energy can neither be created nor destroyed, only converted from one form to another. The second law states that the entropy of an isolated system never decreases over time. Together, these laws explain why heat flows from hot objects to cold ones, why engines can never be perfectly efficient, and why perpetual motion machines are impossible. The unit of energy in the International System is the joule, and the unit of temperature is the kelvin.
+
+Roses are red, the sea is wide, and I have walked a long way to be at your side. The night is cold, the road is long, but every step is a kind of song. When morning comes and the stars grow thin, I shall be home, and you will let me in.
+
+Table 2 shows the results of the survey. Of the 1,204 respondents, 62 percent said that they used public transport at least once a week, 21 percent said that they cycled, and 17 percent said that they never used either. Respondents aged between 18 and 34 were much more likely to cycle than those aged 55 or older (31 percent compared with 9 percent). The differences between men and women were small and not statistically significant.
+
+To reset your password, click the link below and follow the instructions on the page. The link will expire in twenty-four hours. If you did not request a password reset, you can safely ignore this message; your account has not been changed. For security reasons, please do not forward this email to anyone. If you need further help, contact our support team at the address shown on our website.
+
+The match ended in a 2-2 draw after the home side came back from two goals down in the second half. The visitors took an early lead through a header from the captain, and added a second just before the break after a mistake by the goalkeeper. But a double substitution at half time changed the game, and two goals in ten minutes from the young striker earned a point for the hosts. The manager said afterwards that he was proud of the way his players had responded.
+
+Welcome to the Grand Hotel. Your room is on the third floor, at the end of the corridor on the right. Breakfast is served in the dining room between seven and ten o'clock, and the swimming pool is open until nine in the evening. Wireless internet is free of charge; the password is printed on the card in your room. If you need anything at all, please dial zero from the telephone next to your bed, and the reception desk will be glad to help.
+The history of a town is rarely written by the people who live in it. They are too busy mending roofs, selling bread and arguing about the price of grain. It is usually the visitor, passing through on the way to somewhere else, who notices that the church tower leans a little to the left, that the market square is paved with stones from three different centuries, and that nobody can say why the river bends so sharply behind the mill. When the visitor asks, the answers are always the same: it has always been that way, or, my grandfather used to say that it was the fault of the old bridge.
+
+"I do not think you understand," said the doctor, putting down his cup. "A fever of this kind does not come from the water, nor from the air. It comes from the people. Wherever a great number of them are gathered together, there it will be found, and wherever they are scattered it will disappear." His wife looked at him for a long moment and then went on with her sewing. She had heard the same speech many times before, and she knew that in the morning he would be out of the house before sunrise, carrying his black bag down the hill to the harbour.
+
+How to bake a loaf of bread. First, mix four hundred grams of flour with a teaspoon of salt and a teaspoon of dry yeast in a large bowl. Add about three hundred milliliters of warm water and stir until the dough comes together. Turn it out onto a floured surface and knead it for ten minutes, until it is smooth and elastic. Place the dough in a clean bowl, cover it with a damp cloth, and leave it in a warm place for one hour, or until it has doubled in size. Then shape it into a round, set it on a baking tray, and bake it in a hot oven for thirty minutes. The loaf is done when it sounds hollow if you tap the bottom.
+
+The committee met on Tuesday to discuss the proposed changes to the regulations. After a long debate, it was agreed that the new rules would take effect at the beginning of the next financial year, provided that the necessary funds could be found. Several members expressed concern that the timetable was too ambitious, and one of them, Mr. Hollis, pointed out that the previous attempt had failed for exactly this reason. The chairman thanked him for his remarks, noted them in the minutes, and moved on to the next item on the agenda, which concerned the maintenance of the car park.
+
+Photosynthesis is the process by which green plants, algae and some bacteria convert light energy into chemical energy. In the leaves of a plant, chlorophyll absorbs sunlight and uses it to turn carbon dioxide from the air and water from the soil into glucose and oxygen. The glucose is used to build the cellulose of the cell walls and to store energy as starch, while the oxygen is released into the atmosphere. Without this process there would be very little oxygen to breathe, and almost every food chain on the planet would collapse.
+
+On the morning of the third day the wind dropped and the sea went flat and grey. The sailors stood along the rail and said nothing. Far away to the east a thin line of cloud lay on the horizon, and beneath it, so faint that at first nobody was sure of it, there was a darker shape that might have been land. The captain took out his glass, looked for a long time, and then closed it with a snap. "Gentlemen," he said, "we shall have our supper ashore tonight."
+
+Dear Mrs. Fairfax, thank you very much for your kind letter, which reached me last Thursday. I was glad to hear that the garden has recovered from the frost and that the children are well. We have had a quiet winter here. My brother has been ill with a cold, but he is much better now, and the weather has improved, so that we are able to walk out every afternoon. I hope that you will come and see us in the spring, when the roads are dry. Please give my love to everyone, and believe me, yours very sincerely, Margaret Ellison.
+
+Computers store information as sequences of bits. A single bit can be either zero or one, and eight bits make a byte, which can represent any number from zero to two hundred and fifty five. Text is stored by assigning a number to each character, so that the letter A is sixty five and the letter a is ninety seven. Images are stored as grids of colored points, and sound is stored as a long list of numbers that describe how the air pressure changes over time. Compression works by finding patterns in these numbers and describing them in a shorter way, so that the same information takes up less space.
+
+It was the best of afternoons and the worst of afternoons. The rain had started at noon and had not stopped; the streets ran with water, and every doorway held a small crowd of people who had been caught without umbrellas. In the window of the bookshop a young man was arranging a display of old maps, and he did not look up when the bell above the door rang. "We are closed," he said. "Then why is the door open?" asked the woman who had come in. He turned, and for a moment neither of them spoke.
+
+The United Nations was founded in 1945, after the Second World War, with the aim of maintaining peace and security between nations, developing friendly relations, and promoting social progress and human rights. Its main bodies include the General Assembly, in which every member state has one vote, and the Security Council, which has fifteen members, five of them permanent. The headquarters are in New York, and there are major offices in Geneva, Vienna and Nairobi. In 2020 there were one hundred and ninety three member states.
+
+To install the program, download the archive from the website, unpack it into a new directory, and run the setup script as an administrator. If the installation fails, check that you have enough free disk space and that no other program is using the same port. The log file, which is called install.log, will tell you what went wrong. After the installation has finished, restart the computer and start the program from the menu. You will be asked to enter your name and a password; the password must be at least eight characters long and should contain both letters and digits.
+
+Q: What is the capital of France? A: Paris. Q: Who wrote the play Hamlet? A: William Shakespeare. Q: How many days are there in a leap year? A: Three hundred and sixty six. Q: What is the boiling point of water at sea level? A: One hundred degrees Celsius. Q: Which planet is closest to the sun? A: Mercury. Q: In what year did the first men land on the moon? A: 1969.
+
+The old man sat on the bench by the harbour every evening and watched the boats come in. He knew each of them by the sound of its engine, and he could tell from the way they sat in the water whether the catch had been good. When the last one had tied up and the lamps along the quay had been lit, he would get slowly to his feet, tap his stick twice on the stones, and walk home through the narrow streets, where the smell of frying fish came out of every kitchen window.

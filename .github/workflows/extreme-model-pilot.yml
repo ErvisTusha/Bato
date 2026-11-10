@@ -1,0 +1,61 @@
+name: Extreme model Canterbury pilot
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/core/cm/**'
+      - 'src/core/codec.rs'
+      - 'Cargo.toml'
+      - '.github/workflows/extreme-model-pilot.yml'
+  pull_request:
+    paths:
+      - 'src/core/cm/**'
+      - 'src/core/codec.rs'
+      - 'Cargo.toml'
+      - '.github/workflows/extreme-model-pilot.yml'
+  workflow_dispatch:
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Rust formatting and mandatory lossless tests
+        run: |
+          cargo fmt --all -- --check
+          cargo test --release --locked
+      - name: Build the release binary
+        run: cargo build --release --locked
+      - name: Download complete Canterbury development inputs
+        run: |
+          cat > /tmp/bato-canterbury-source.json <<'JSON'
+          {"schema_version":1,"assets":[{"id":"canterbury-ci-pilot","category":"canterbury-ci-pilot","urls":["https://corpus.canterbury.ac.nz/resources/cantrbry.tar.gz"],"destination":"real/compression/canterbury_ci_pilot","prepared_bytes":5000000,"transfer_bytes":739071,"archive":"tar","expected_size":739071,"origin":"real"}]}
+          JSON
+          python3 scripts/download_corpus.py --manifest /tmp/bato-canterbury-source.json             --target canterbury-ci-pilot --jobs 1 --max-bytes 6000000             -o /tmp/bato-canterbury
+          python3 scripts/download_corpus.py -o /tmp/bato-canterbury --audit-existing
+          python3 scripts/benchmark_suite.py -c /tmp/bato-canterbury             --target canterbury --mode rigorous --track native --workload files             --list-workloads > /tmp/bato-model-workloads.json
+      - name: Verified benchmarks with automatic resources
+        run: |
+          python3 scripts/benchmark_suite.py \
+            -c /tmp/bato-canterbury --target canterbury --mode rigorous \
+            --track native --workload files --codecs bato \
+            --bato-bin target/release/bato \
+            --warmups 1 --repetitions 5 --timeout 1800 \
+            --frozen-workloads /tmp/bato-model-workloads.json \
+            --output-dir /tmp/bato-model-bench --scratch-dir /tmp/bato-model-scratch \
+            --label "automatic resources"
+      - name: Preserve canonical records and exact inventory
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: extreme-model-canterbury
+          path: |
+            /tmp/bato-model-bench
+            /tmp/bato-model-workloads.json
+            /tmp/bato-canterbury-source.json
+          if-no-files-found: warn
