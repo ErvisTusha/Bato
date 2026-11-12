@@ -38,26 +38,18 @@ struct Found {
     recipe: Vec<u8>,
 }
 
-/// A cheap prefilter for valid DEFLATE beginnings. Stored-block length
-/// complements are nearly free to check; fixed-Huffman scans are restricted
-/// to the segment start or a preceding zlib header to avoid parsing random
-/// bytes at roughly one in eight offsets.
+/// A cheap prefilter for valid DEFLATE beginnings. Fixed-Huffman scans are
+/// restricted to the segment start or a preceding zlib header to avoid
+/// parsing random bytes at roughly one in eight offsets. Streams that begin
+/// with a stored block are not scanned: on a 196 MB tree of executables that
+/// made the archive 18,266 bytes larger and gained nothing on 64 small
+/// deflate-bearing files (docs/validation.md).
 fn plausible_start(raw: &[u8], at: usize) -> bool {
     let bytes = &raw[at..];
     let Some(&first) = bytes.first() else {
         return false;
     };
     match (first >> 1) & 3 {
-        0 => {
-            // Stored blocks ignore the five padding bits in their first
-            // byte; do not reject valid nonzero padding.
-            if bytes.len() < 5 {
-                return false;
-            }
-            let length = u16::from_le_bytes([bytes[1], bytes[2]]);
-            let complement = u16::from_le_bytes([bytes[3], bytes[4]]);
-            length ^ complement == u16::MAX
-        }
         1 => {
             // Fixed-Huffman blocks may be followed by another block. Scan
             // only the segment start or a plausible preceding zlib header.
@@ -266,23 +258,14 @@ mod tests {
     }
 
     #[test]
-    fn stored_blocks_and_zlib_wrapped_fixed_starts_are_detected_cheaply() {
+    fn stored_starts_are_skipped_and_zlib_wrapped_fixed_starts_detected() {
         let stored = include_bytes!("fixtures/stored.deflate");
-        assert!(plausible_start(stored, 0));
-        let mut embedded = b"unrelated bytes preceding a stored stream".to_vec();
-        embedded.extend_from_slice(stored);
-        assert!(plausible_start(&embedded, embedded.len() - stored.len()));
-        // A stored block grows by its own DEFLATE header. Recognition does
-        // not imply that inflating it is a profitable representation.
-        assert!(scan(&embedded, 1 << 22).is_empty());
-        assert!(forward(&embedded, 1 << 22, 4096).is_none());
-
-        assert!(plausible_start(&[0xf8, 0x01, 0x00, 0xfe, 0xff], 0));
+        assert!(!plausible_start(stored, 0));
+        assert!(!plausible_start(&[0xf8, 0x01, 0x00, 0xfe, 0xff], 0));
         assert!(plausible_start(&[0x02, 0x00], 0));
         assert!(plausible_start(&[0x03, 0x00], 0));
         assert!(plausible_start(&[0x78, 0x9c, 0x03, 0x00], 2));
         assert!(!plausible_start(&[0xaa, 0xbb, 0x03, 0x00], 2));
-        assert!(!plausible_start(&[0x00, 0x01, 0x00, 0x00, 0x00], 0));
     }
 
     #[test]

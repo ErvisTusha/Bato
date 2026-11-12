@@ -13,9 +13,10 @@ work does not introduce fast/balanced presets, loosen validation, or change the
   select LZ matches using encoded command cost, not just match length.
 - Use optimal package-merge for Huffman histograms whose normal tree exceeds 15 bits.
 - Choose DEFLATE reconstruction recipes by their exact serialized byte count, without repeated serialization; also test the supported wider hash configuration at the strongest narrow predictor level.
-- Recognize stored DEFLATE blocks using the length complement, and selectively
-  recognize fixed-Huffman blocks at the beginning of input or after a valid zlib
-  header. The existing exact re-encode check still decides acceptance.
+- Recognize fixed-Huffman DEFLATE blocks at the beginning of input or after a
+  valid zlib header. The existing exact re-encode check still decides
+  acceptance. (Recognizing stored blocks was measured and removed: it made
+  the Node.js tree 18,266 bytes larger.)
 - Compare actual framed costs of DEFLATE, x86-transformed and original context mixing, rather than returning as soon as DEFLATE wins.
 - When the independent codec finds a winning delta/shuffle filter, test that filter with CM as an additional candidate (not an exhaustive search of all five expensive CM filters).
 - Reject the whole x86 selection allocation when fewer than 33 candidate sites could ever qualify.

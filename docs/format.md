@@ -62,7 +62,7 @@ with the primer as the history. The segment's own bytes then continue that
 history, so contexts, matches and word statistics span the boundary. Table
 and match-index sizes are chosen for primer plus
 segment length. When the bit is set, the segment's model starts empty and the history is just
-the segment. The encoder tries both for segments up to 2 MiB and keeps the
+the segment. The encoder tries both for segments up to 16 MiB and keeps the
 smaller; larger segments always read the primer. The primer is part of the
 format: changing a byte of it requires a new format version.
 

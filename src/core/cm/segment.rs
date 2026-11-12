@@ -39,7 +39,7 @@ fn prime(model: &mut Predictor, primer: &[u8]) {
 
 /// Largest segment for which the encoder also tries coding without the
 /// primer, which helps data unlike the primer's text and code.
-const UNPRIMED_TRIAL_BYTES: usize = 1 << 21;
+const UNPRIMED_TRIAL_BYTES: usize = 1 << 24;
 
 /// How a CM segment was prepared before and during coding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

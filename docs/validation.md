@@ -642,6 +642,44 @@ does about 2.8 times the model work of unpack (trials with and without the
 primer, and one model run per candidate). No model step exceeds 15% of the
 model time; a callgrind profile counts about 5,500 instructions per bit.
 
+## Stored-block detection removed; unprimed trial up to 16 MiB (2026-11-13)
+
+Format 1.19 unchanged; both are encoder choices.
+
+**Stored-block detection.** Commit 89a3365 made the deflate scan also accept
+streams beginning with a stored or a fixed-Huffman block. Packed without the
+extra plain model run to isolate the scan:
+
+| Scan accepts | Node.js v22.23.4 tree | 64 small deflate-bearing files |
+|---|---|---|
+| dynamic blocks only (before 89a3365) | 25,146,776 | 3,823,691 |
+| dynamic, fixed and stored | 25,165,042 | 3,823,623 |
+| dynamic and fixed (now) | 25,146,776 | 3,823,623 |
+| dynamic and stored | 25,165,042 | 3,823,691 |
+
+Stored-block starts cost 18,266 bytes on the tree and gain nothing on the
+small files, so they are no longer scanned. The 24-file set is byte-identical
+before and after. The tree was not re-measured with the shipped build, which
+also runs the plain model.
+
+**Unprimed trial.** The encoder tried coding without the primer only up to
+2 MiB; now up to 16 MiB. Sizes and single-run wall seconds, restored and
+compared:
+
+| File | Bytes | Before | After | Pack before / after | Unpack after |
+|---|---|---|---|---|---|
+| xml | 5,345,280 | 309,379 | 309,379 | 27.3 / 29.0 | 28.6 |
+| ooffice | 6,152,192 | 1,711,374 | 1,710,651 | 93.4 / 69.5 | 34.0 |
+| reymont | 6,627,202 | 931,514 | 929,935 | 33.0 / 34.4 | 32.5 |
+| sao | 7,251,944 | 4,429,918 | 4,428,723 | 43.8 / 49.5 | 43.2 |
+
+The second trial runs on an idle core, so wall time changes little; CPU time
+about doubles. Competitors at maximum on the same files (7z -mx9 / rar -m5 /
+zip -9 / xz -9e): xml 455,003 / 484,666 / 662,418 / 434,892; ooffice
+2,425,568 / 2,302,392 / 3,090,580 / 2,427,224; reymont 1,318,394 / 1,444,842
+/ 1,820,972 / 1,315,592; sao 4,413,926 / 5,542,627 / 5,327,175 / 4,425,664.
+Bato loses on `sao` to 7z by 0.34% and to xz by 0.07%.
+
 ## Rejected experiments (kept so they are not repeated)
 
 * **Early exit for incompressible chunks** (abort the model attempt after two
