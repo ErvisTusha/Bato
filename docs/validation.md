@@ -608,6 +608,40 @@ data is about 2.2 times slower, because each such segment is modeled once per
 candidate; and the Node.js tree is 4,460 bytes larger, cause not yet found.
 The Go and Antigravity trees were not re-measured.
 
+## Pixel templates in the bit-neighbourhood model, format 1.19 (2026-11-12)
+
+The bit-neighbourhood model predicted each bit from 7 nearby bits. It now also
+uses two 16-pixel templates and one hashed 33-pixel template over the three
+rows above (the row is the record period the record model infers). Against
+commit 7b4c4d9, every output restored and compared:
+
+| Data | Before | After | Change |
+|---|---|---|---|
+| `ptt5` (fax image, 513,216 bytes) | 27,408 | 24,330 | -11.2% |
+| `kennedy.xls` (1,029,744 bytes) | 13,817 | 13,293 | -3.8% |
+| `hopper.bmp` | 23,706 | 23,624 | -0.3% |
+| `kodim09.ppm` | 363,601 | 362,698 | -0.2% |
+| 24 files of different types (2,072,616 bytes) | 1,179,336 | 1,178,783 | -0.05% |
+| 103 development files | 1,360,250 | 1,355,978 | -0.31% |
+
+On the development files 27 shrink and 13 grow, each of the 13 by one byte.
+Pack and unpack times of both sets are unchanged within noise (103 files, 4 at
+a time: 53.6 / 27.5 s before, 53.7 / 27.8 s after). Unpacking `ptt5`, where the
+templates are active, takes 2.83 s against 2.67 s (+6%). `paq8px -9L` remains
+far smaller on these two files (16,907 and 7,694 bytes). Large trees were not
+measured.
+
+The same commit makes the row expert's periodic scan about 20% faster with
+byte-identical archives (16-bit partial sums; a selection instead of a sort
+for the median): 963 to 749 ms of 18 s model time when unpacking the 24 files.
+
+**Step timing on the 24 files** (`--timing`, one thread): primer training is
+28% of pack and 34% of unpack time, model coding 70% and 66%, everything else
+under 2%. On a 20 KB file the primer is 92% of the unpack time (0.5 s). Pack
+does about 2.8 times the model work of unpack (trials with and without the
+primer, and one model run per candidate). No model step exceeds 15% of the
+model time; a callgrind profile counts about 5,500 instructions per bit.
+
 ## Rejected experiments (kept so they are not repeated)
 
 * **Early exit for incompressible chunks** (abort the model attempt after two
@@ -676,4 +710,10 @@ The Go and Antigravity trees were not re-measured.
   packs in 73.72 s instead of 171.38 s, but `ptt5` grows from 27,408 to 27,584
   bytes (+0.64%): there the plain run beats the transform the statistics chose.
   Size outranks packing time, so the exact comparison stays.
+* **Two exact-neighbourhood contexts in the row expert** (bytes above, above
+  left and right, left; and two rows above): `ptt5` 27,408 to 27,341 (-0.24%),
+  `hopper.bmp` +4 bytes. The gap on bilevel images was in the bit-level
+  neighbourhood, not here.
+* **Slower adaptation for the pixel templates** (count limit 1023 instead of
+  256): `ptt5` 24,423 against 24,330, `kennedy.xls` 13,302 against 13,293.
 

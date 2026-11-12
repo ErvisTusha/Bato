@@ -13,7 +13,7 @@ use super::{
     mixer::Mixer,
     models::{
         matcher::{self, Matcher},
-        neighbors::Neighbors,
+        neighbors::{self, Neighbors},
         order,
         record::Records,
         rows::Rows,
@@ -61,6 +61,8 @@ const EXPERT_ACTIVE_INPUTS: [usize; EXPERTS] = [32, 32, 32, 48];
 /// Final-mixer input slots after the three first-layer mixers.
 const NEIGHBOR_INPUT: usize = 3;
 const EXPERT_INPUT: usize = 4;
+/// Final-mixer slots of the bit-neighbourhood templates, after the experts.
+const TEMPLATE_INPUT: usize = EXPERT_INPUT + EXPERTS;
 /// Final-mixer inputs the mixer reads; the last one holds the bias.
 const FINAL_ACTIVE_INPUTS: usize = 16;
 /// Initial weights in units of 1/256: the context features' first input
@@ -121,6 +123,7 @@ pub(super) struct Predictor {
 
 pub(super) fn memory_required(length: usize, table_log2: u8) -> usize {
     table::memory_required(length, table_log2)
+        + neighbors::memory_required()
         + matcher::memory_required(length, table_log2)
         + MIX_CONTEXTS
             .into_iter()
@@ -179,7 +182,7 @@ impl Predictor {
             records: Records::default(),
             stride: Stride::default(),
             rows: Rows::default(),
-            neighbors: Neighbors::default(),
+            neighbors: Neighbors::new()?,
             record_map: ContextMap::new(),
             record_active: false,
             record_base: 0,
@@ -320,7 +323,10 @@ impl Predictor {
             self.second[i] =
                 logistic::stretch(mixer.predict(&self.inputs, selectors[i], self.dispatch));
         }
-        self.second[NEIGHBOR_INPUT] = self.neighbors.feature(self.prefix);
+        let neighbors = self.neighbors.feature(self.prefix);
+        self.second[NEIGHBOR_INPUT] = neighbors[0];
+        self.second[TEMPLATE_INPUT..TEMPLATE_INPUT + neighbors::FEATURES - 1]
+            .copy_from_slice(&neighbors[1..]);
         self.lap(Step::FirstMixers);
         for e in (0..EXPERTS).filter(|&e| self.expert_active[e]) {
             for i in 0..EXPERT_SIZES[e] {

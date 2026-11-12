@@ -83,9 +83,9 @@ PATCHES = [
     ),
     (  # first-layer mixers 120..122, neighbours 130
         CM + "predictor.rs",
-        "        self.second[NEIGHBOR_INPUT] = self.neighbors.feature(self.prefix);\n",
+        "        let neighbors = self.neighbors.feature(self.prefix);\n",
         "        if (120..123).contains(&ABLATE) {\n            self.second[ABLATE.saturating_sub(120)] = 0;\n        }\n"
-        "        self.second[NEIGHBOR_INPUT] = if ABLATE == 130 {\n            0\n        } else {\n"
+        "        let neighbors = if ABLATE == 130 {\n            [0; neighbors::FEATURES]\n        } else {\n"
         "            self.neighbors.feature(self.prefix)\n        };\n",
     ),
     (  # experts 140..143: forced dormant for the whole byte

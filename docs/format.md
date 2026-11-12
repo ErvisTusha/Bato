@@ -1,7 +1,7 @@
-# Bato format 1.18
+# Bato format 1.19
 
 A `.bato` stream holds file bytes or a serialized directory tree. Bato 0.8
-accepts format 1.18 as its underlying compression stream.
+accepts format 1.19 as its underlying compression stream.
 
 The stream is a 10-byte header, zero or more blocks, and a footer. Fixed-width
 integers are little-endian. Variable integers are canonical unsigned LEB128:
@@ -14,7 +14,7 @@ follows; redundant leading zero groups and values exceeding u64 are rejected.
 |---|---|---|
 | 0 | 4 | `BATO` |
 | 4 | 1 | Major `1` |
-| 5 | 1 | Minor `18` (the version of this document; other values are rejected) |
+| 5 | 1 | Minor `19` (the version of this document; other values are rejected) |
 | 6 | 1 | Flags: bit 0 directory archive; other bits zero |
 | 7 | 1 | Segment log2, 16..30 (default 26) |
 | 8 | 1 | CM chunk log2, 12..20, no greater than segment log2 (default 18) |
@@ -305,7 +305,7 @@ part of the decoding contract. All choices compare complete serialized bytes.
 ## Archive envelopes and split volumes
 
 Directory archives can be wrapped in separately versioned envelopes. Plain
-`BATO` streams use format 1.18. All wrapper
+`BATO` streams use format 1.19. All wrapper
 integers are unsigned and little-endian.
 
 - `BAE1` is followed by one binary [age v1](https://c2sp.org/age) passphrase
@@ -333,7 +333,7 @@ Encryption randomness is independent of Bato's deterministic compressor.
 
 ## Checkpoints and recovery
 
-Bato 0.8 keeps the normal `BATO` 1.18 stream. A local `BAJ2` checkpoint
+Bato 0.8 keeps the normal `BATO` 1.19 stream. A local `BAJ2` checkpoint
 records complete segment boundaries, accumulated CRC32C, and SHA-256
 identities for the source and staged output. Private checkpoint records use
 independent age X25519 payloads. The job identity is stored in an age

@@ -41,19 +41,31 @@ fn difference(history: &[u8], lag: usize) -> usize {
         .sum()
 }
 
+/// Samples summed in 16-bit lanes before widening: 256 differences of at
+/// most 255 cannot overflow a `u16`.
+const BLOCK_SAMPLES: usize = 256;
+
 /// `difference` for every row distance in `MIN_ROW..=MAX_ROW` at once, indexed
 /// by `MAX_ROW - lag`. Walking the earlier bytes of each sample contiguously
-/// lets the compiler vectorise the sums; the totals equal `difference`'s.
+/// and summing in 16-bit lanes lets the compiler vectorise the sums sixteen
+/// bytes at a time; the totals equal `difference`'s.
 fn row_differences(history: &[u8]) -> Vec<u32> {
     let end = history.len();
     let mut sums = vec![0u32; MAX_ROW - MIN_ROW + 1];
-    for k in 0..SAMPLES {
-        let i = end - 1 - k * SAMPLE_STEP;
-        let current = history[i];
-        // Positions i - MAX_ROW ..= i - MIN_ROW, i.e. lags MAX_ROW down to MIN_ROW.
-        let earlier = &history[i - MAX_ROW..=i - MIN_ROW];
-        for (sum, &byte) in sums.iter_mut().zip(earlier) {
-            *sum += u32::from(current.abs_diff(byte));
+    let mut block = vec![0u16; MAX_ROW - MIN_ROW + 1];
+    for first in (0..SAMPLES).step_by(BLOCK_SAMPLES) {
+        block.fill(0);
+        for k in first..(first + BLOCK_SAMPLES).min(SAMPLES) {
+            let i = end - 1 - k * SAMPLE_STEP;
+            let current = history[i];
+            // Positions i - MAX_ROW ..= i - MIN_ROW, i.e. lags MAX_ROW down to MIN_ROW.
+            let earlier = &history[i - MAX_ROW..=i - MIN_ROW];
+            for (sum, &byte) in block.iter_mut().zip(earlier) {
+                *sum += u16::from(current.abs_diff(byte));
+            }
+        }
+        for (sum, &part) in sums.iter_mut().zip(&block) {
+            *sum += u32::from(part);
         }
     }
     sums
@@ -93,8 +105,8 @@ impl Rows {
             .map(|lag| (sums[MAX_ROW - lag] as usize, lag))
             .collect();
         let best = scores.iter().copied().min();
-        scores.sort_unstable();
-        let median = scores[scores.len() / 2].0;
+        let middle = scores.len() / 2;
+        let median = scores.select_nth_unstable(middle).1 .0;
         self.row = best
             .filter(|&(score, _)| score * 16 <= median * MAX_RELATIVE_SIXTEENTHS)
             .map(|(_, lag)| lag);

@@ -6,7 +6,7 @@ pub const MAGIC: [u8; 4] = *b"BATO";
 /// Format version. Any change to the container or the model that alters
 /// encoded bytes increments it; readers accept exactly this version.
 pub const VERSION_MAJOR: u8 = 1;
-pub const VERSION_MINOR: u8 = 18;
+pub const VERSION_MINOR: u8 = 19;
 /// Largest chunk the format allows (chunk log2 <= 20).
 pub const MAX_CHUNK_SIZE: usize = 1024 * 1024;
 pub const DEFAULT_SEGMENT_SIZE: usize = 64 * 1024 * 1024;
