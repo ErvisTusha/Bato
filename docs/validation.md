@@ -716,4 +716,11 @@ model time; a callgrind profile counts about 5,500 instructions per bit.
   neighbourhood, not here.
 * **Slower adaptation for the pixel templates** (count limit 1023 instead of
   256): `ptt5` 24,423 against 24,330, `kennedy.xls` 13,302 against 13,293.
+* **Shorter or no primer, format 1.19.** 24 files of different types
+  (2,072,616 bytes), 4 at a time, single runs; total size and unpack seconds:
+  full 104,049-byte primer 1,178,783 / 10.8; first 65,536 bytes 1,181,761
+  (+0.25%) / 9.8; 32,768 bytes 1,182,691 (+0.33%) / 9.4; 16,384 bytes
+  1,183,086 (+0.37%) / 8.2; 8,192 bytes 1,183,697 (+0.42%) / 8.7; none
+  1,186,034 (+0.62%) / 7.8. Fourteen files grow in every variant and none
+  shrinks without the primer. Size outranks unpack time, so the primer stays.
 
