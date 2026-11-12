@@ -586,6 +586,28 @@ runs, 4 cores): Bato pack 526.42 s, unpack 510.73 s; 7z pack 85.6 s, unpack
 pack 1681.29 s, unpack 1606.30 s (1.17: 1637.24 / 1616.58; single runs),
 restored tree identical. Every slice and tree was restored and compared.
 
+## Exact candidate comparison and filter trial, commit 89a3365 (2026-11-12)
+
+The changes listed in `docs/ultra-optimization.md` (format 1.18 unchanged)
+against the previous 1.18 build, same machine, single runs. Gates pass: fmt,
+clippy, `cargo test --release`, Python unit tests, `scripts/run_tests.py`.
+
+| Data | Before | After | Change | Pack s before / after | Unpack s before / after |
+|---|---|---|---|---|---|
+| 103 development files (4 at a time) | 1,398,987 | 1,360,250 | -2.77% | 46.8 / 54.2 | 32.4 / 27.9 |
+| Folder: 4 executables, 3 text files, 1 gzip (11,278,499 bytes) | 2,765,991 | 2,765,008 | -0.04% | 79.01 / 171.38 | 79.23 / 62.87 |
+| Node.js v22.23.4 tree (196,453,447 bytes) | 25,212,353 | 25,216,813 | **+0.02% (4,460 bytes larger)** | 515.37 / 1150.74 | 491.30 / 389.52 |
+| Four executables under 5 MB | 3,118,331 | 3,117,859 | -0.02% | not timed | not timed |
+
+Every output was restored and compared (`cmp`, `diff -r`). No development file
+grew; the largest gains are `hopper.bmp` 28,418 to 23,706 (-16.6%) and
+`sample-3s.wav` 211,340 to 177,579 (-16.0%), from coding the delta or shuffle
+filter the independent codec picked with the model as well; Office files gain
+0.1% to 0.5%. Unpacking is 14% to 21% faster. Losses: packing code or deflate
+data is about 2.2 times slower, because each such segment is modeled once per
+candidate; and the Node.js tree is 4,460 bytes larger, cause not yet found.
+The Go and Antigravity trees were not re-measured.
+
 ## Rejected experiments (kept so they are not repeated)
 
 * **Early exit for incompressible chunks** (abort the model attempt after two
@@ -649,3 +671,9 @@ restored tree identical. Every slice and tree was restored and compared.
   pages system-wide (`always`) gave 28.75 / 28.94 / 28.93 s against 29.12 /
   31.22 / 30.38 s, a gain of about 4% that needs a system setting, so it is
   not available to the program itself.
+* **Skipping the plain model run once an x86 or deflate candidate has won**
+  (on commit 89a3365). The folder of executables stays at 2,765,008 bytes and
+  packs in 73.72 s instead of 171.38 s, but `ptt5` grows from 27,408 to 27,584
+  bytes (+0.64%): there the plain run beats the transform the statistics chose.
+  Size outranks packing time, so the exact comparison stays.
+

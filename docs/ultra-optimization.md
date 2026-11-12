@@ -37,8 +37,9 @@ compression algorithms is impossible, and exhaustive evaluation of every CM
 filter would multiply model time. The current filter shortlisting uses the best
 independent transform as a cheap proxy and retains unfiltered CM as a candidate.
 
-The code has not been compiled or benchmarked in this environment. Existing
-repository tests need to be run locally or by CI before the draft PR is ready.
+The code was compiled, gated and measured on 2026-11-12; the results,
+including a 2.2 times slower pack on code and deflate data and a 4,460-byte
+loss on the Node.js tree, are in `docs/validation.md`.
 
 ## More invasive work intentionally not mixed into this compatibility PR
 
