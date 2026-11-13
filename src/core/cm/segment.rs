@@ -52,6 +52,8 @@ pub(crate) struct Coding {
 #[derive(Clone, Copy)]
 struct Run<'a> {
     primer: Primer,
+    /// Optional models declared unused.
+    mask: u8,
     dispatch: Dispatch,
     budget: Option<usize>,
     /// Largest input the run accepts: the segment size, or for deflate-
@@ -92,6 +94,9 @@ impl Snapshot {
         }
     }
 }
+
+/// Largest input for which the encoder searches for unused optional models.
+const MASK_SEARCH_BYTES: usize = 1 << 23;
 
 /// Whether the encoder may run its independent model trials on two threads.
 /// The archive is the same either way; only the time differs.
@@ -420,12 +425,25 @@ fn model_candidate(
     limit: usize,
     (timing, snapshot): (Timing<'_>, &mut Snapshot),
 ) -> Result<Option<(usize, Primer, Vec<Chunk>)>, BatoError> {
+    let masked = |primer, mask, cap| -> Result<Option<(usize, Primer, Vec<Chunk>)>, BatoError> {
+        let run = Run {
+            primer,
+            mask,
+            dispatch: Dispatch::Native,
+            budget: Some(cap),
+            max_bytes,
+            timing,
+        };
+        let chunks = encode_model(input, descriptor, run, None)?;
+        Ok(chunks.map(|chunks| (chunks_cost(&chunks), primer, chunks)))
+    };
     let run = |primer,
                cap,
                snapshot: Option<&mut Snapshot>|
      -> Result<Option<(usize, Primer, Vec<Chunk>)>, BatoError> {
         let run = Run {
             primer,
+            mask: 0,
             dispatch: Dispatch::Native,
             budget: Some(cap),
             max_bytes,
@@ -457,6 +475,19 @@ fn model_candidate(
     for trial in outcomes.into_iter().flatten() {
         if cheapest.as_ref().is_none_or(|(best, ..)| trial.0 < *best) && trial.0 < limit {
             cheapest = Some(trial);
+        }
+    }
+    // Declare unused every optional model whose removal does not make the
+    // segment larger: the decoder then skips it. Greedy, one model at a time.
+    if input.len() <= MASK_SEARCH_BYTES {
+        if let Some((mut best, primer, mut chunks)) = cheapest.take() {
+            let mut mask = 0u8;
+            for bit in 0..predictor::OPTIONAL_MODELS {
+                if let Some((cost, _, trial)) = masked(primer, mask | 1 << bit, best + 1)? {
+                    (best, chunks, mask) = (cost, trial, mask | 1 << bit);
+                }
+            }
+            cheapest = Some((best, primer, chunks));
         }
     }
     Ok(cheapest)
@@ -582,6 +613,7 @@ fn encode_model(
         Some(model) => model,
         None => {
             let mut model = Predictor::new(total, descriptor.table_log2, run.dispatch)?;
+            model.set_mask(run.mask);
             run.timing
                 .time(Step::PrimerTraining, || prime(&mut model, primer));
             if let Some(snapshot) = snapshot.filter(|snapshot| snapshot.wanted) {
@@ -605,7 +637,20 @@ fn encode_model(
         )
     });
     model.finish_meter(run.timing);
-    coded
+    // The first coded chunk's payload starts with the model mask.
+    let Some(mut chunks) = coded? else {
+        return Ok(None);
+    };
+    if let Some(first) = chunks
+        .iter_mut()
+        .find(|chunk| chunk.kind == BlockType::Coded)
+    {
+        first.payload.insert(0, run.mask);
+        if first.payload.len() >= first.length as usize {
+            return Ok(None);
+        }
+    }
+    Ok(Some(chunks))
 }
 
 fn encode_chunks(
@@ -719,6 +764,15 @@ fn decode_chunks(
         descriptor.table_log2,
         Dispatch::Native,
     )?;
+    let first_coded = chunks
+        .iter()
+        .position(|chunk| chunk.kind == BlockType::Coded)
+        .unwrap_or(last_coded);
+    let mask = chunks[first_coded].payload.first().copied().unwrap_or(0);
+    if mask >> predictor::OPTIONAL_MODELS != 0 {
+        return Err(BatoError::CorruptStream("unknown model mask".into()));
+    }
+    model.set_mask(mask);
     timing.time(Step::PrimerTraining, || prime(&mut model, primer));
     if timing.enabled() {
         model.start_meter();
@@ -727,7 +781,7 @@ fn decode_chunks(
     let started = timing.start();
     for (index, chunk) in chunks.iter().enumerate() {
         if chunk.kind == BlockType::Coded {
-            let mut coder = Decoder::new(&chunk.payload);
+            let mut coder = Decoder::new(&chunk.payload[usize::from(index == first_coded)..]);
             for _ in 0..chunk.length {
                 let mut byte = 0u8;
                 for _ in 0..8 {

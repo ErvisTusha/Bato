@@ -33,6 +33,10 @@ const CONTEXTS: usize = order::COUNT + 4;
 /// three-word context. Expert 1 models sparse structure: bytes 2, 3 and 4
 /// back and the 2/3 pair. Kept out of the main networks, where extra inputs
 /// measurably hurt text.
+/// Optional models a segment can declare unused, one mask bit each: the
+/// text, sparse, lag and row experts, the record map and the bit
+/// neighbourhood.
+pub(super) const OPTIONAL_MODELS: u8 = 6;
 const EXPERTS: usize = 4;
 const EXPERT_CONTEXTS: usize = 8;
 /// Contexts each expert really uses; the row expert has eight.
@@ -101,6 +105,8 @@ pub(super) struct Predictor {
     neighbors: Neighbors,
     record_map: ContextMap,
     record_active: bool,
+    /// Optional models the stream declares unused (see `OPTIONAL_MODELS`).
+    mask: u8,
     record_base: u64,
     mixers: [Mixer; 3],
     final_mixer: Mixer,
@@ -186,6 +192,7 @@ impl Predictor {
             neighbors: Neighbors::new()?,
             record_map: ContextMap::new(),
             record_active: false,
+            mask: 0,
             record_base: 0,
             mixers: [
                 Mixer::with_inputs(MIX_CONTEXTS[0], initial, MIXER_RATE, ACTIVE_INPUTS)?,
@@ -227,6 +234,11 @@ impl Predictor {
             meter: None,
         })
     }
+    /// Declares optional models unused for the whole segment; call before
+    /// the first byte.
+    pub(super) fn set_mask(&mut self, mask: u8) {
+        self.mask = mask;
+    }
     pub(super) fn probability(&mut self, history: &[u8]) -> u16 {
         let depth = coded_bits(self.prefix) as usize;
         self.lap(Step::Coder);
@@ -264,14 +276,21 @@ impl Predictor {
             self.lap(Step::ByteLag);
             self.rows.begin_byte(history);
             self.expert_bases[3] = self.rows.contexts(history);
-            self.expert_active[2] = self.stride.active();
-            self.expert_active[3] = self.rows.active();
+            self.expert_active[0] = self.mask & 1 == 0;
+            self.expert_active[1] = self.mask & 2 == 0;
+            self.expert_active[2] = self.mask & 4 == 0 && self.stride.active();
+            self.expert_active[3] = self.mask & 8 == 0 && self.rows.active();
             self.lap(Step::ByteRows);
             let record = self.records.begin_byte(history);
-            self.record_active = record.is_some();
+            self.record_active = self.mask & 16 == 0 && record.is_some();
             self.record_base = record.unwrap_or(0);
-            self.neighbors
-                .begin_byte(history, self.records.period().or(self.rows.period()));
+            self.neighbors.begin_byte(
+                history,
+                self.records
+                    .period()
+                    .or(self.rows.period())
+                    .filter(|_| self.mask & 32 == 0),
+            );
             self.lap(Step::ByteRecords);
         }
         // The calibration rows are known now; load them while the contexts
