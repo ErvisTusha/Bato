@@ -428,6 +428,379 @@ fn decode_bytes(payload: &[u8], length: usize) -> Vec<u8> {
     out
 }
 
+// ---------- match coding ----------
+//
+// The second method for a block: repeats are coded as (length, distance)
+// pairs and the rest as literals, all through adaptive bit models and the
+// arithmetic coder. It suits program code and mixed data, where block
+// sorting is weak. Provenance: Lempel-Ziv 1977 parsing with lazy matching
+// and the general literal/match/repeat-distance modelling described for
+// LZMA in public documentation; the models, parser and Rust are original.
+
+const MIN_MATCH: usize = 4;
+const MAX_MATCH: usize = MIN_MATCH + 271;
+const HASH_BITS: u32 = 20;
+/// Earlier positions examined per match search.
+const CHAIN: usize = 96;
+/// Adaptation shift of the bit models.
+const RATE: u32 = 5;
+/// Marks a match-coded block where a sorted block stores its row.
+const MATCH_CODED: u32 = u32::MAX;
+
+struct BitModels {
+    is_match: [u16; 2],
+    is_repeat: u16,
+    literal: Vec<u16>,
+    length_choice: [[u16; 2]; 2],
+    length_low: [[u16; 8]; 2],
+    length_mid: [[u16; 8]; 2],
+    length_high: [[u16; 256]; 2],
+    slot: [[u16; 64]; 4],
+    special: Vec<u16>,
+    align: [u16; 16],
+}
+
+impl BitModels {
+    fn new() -> Self {
+        Self {
+            is_match: [2048; 2],
+            is_repeat: 2048,
+            literal: vec![2048; 16 * 256],
+            length_choice: [[2048; 2]; 2],
+            length_low: [[2048; 8]; 2],
+            length_mid: [[2048; 8]; 2],
+            length_high: [[2048; 256]; 2],
+            slot: [[2048; 64]; 4],
+            special: vec![2048; 64 * 16],
+            align: [2048; 16],
+        }
+    }
+}
+
+/// Distance code: values below 4 are their own slot; above, the slot holds
+/// the top two bits and the count of bits that follow.
+fn distance_slot(x: u32) -> u32 {
+    if x < 4 {
+        return x;
+    }
+    let top = 31 - x.leading_zeros();
+    2 * top + ((x >> (top - 1)) & 1)
+}
+
+struct Encoder {
+    low: u32,
+    high: u32,
+    out: Vec<u8>,
+}
+
+impl Encoder {
+    fn code(&mut self, bit: u32, p: u32) {
+        let middle = self.low + ((u64::from(self.high - self.low) * u64::from(p)) >> 12) as u32;
+        if bit == 1 {
+            self.high = middle;
+        } else {
+            self.low = middle + 1;
+        }
+        while (self.low ^ self.high) & 0xff00_0000 == 0 {
+            self.out.push((self.high >> 24) as u8);
+            self.low <<= 8;
+            self.high = self.high << 8 | 255;
+        }
+    }
+
+    fn bit(&mut self, model: &mut u16, bit: u32) {
+        self.code(bit, u32::from(*model));
+        if bit == 1 {
+            *model += (4096 - *model) >> RATE;
+        } else {
+            *model -= *model >> RATE;
+        }
+    }
+
+    fn tree(&mut self, models: &mut [u16], bits: u32, value: u32) {
+        let mut node = 1usize;
+        for shift in (0..bits).rev() {
+            let bit = (value >> shift) & 1;
+            self.bit(&mut models[node], bit);
+            node = node << 1 | bit as usize;
+        }
+    }
+
+    fn plain(&mut self, bits: u32, value: u32) {
+        for shift in (0..bits).rev() {
+            self.code((value >> shift) & 1, 2048);
+        }
+    }
+}
+
+struct Decoder<'a> {
+    low: u32,
+    high: u32,
+    code: u32,
+    payload: &'a [u8],
+    at: usize,
+}
+
+impl<'a> Decoder<'a> {
+    fn new(payload: &'a [u8]) -> Self {
+        let mut decoder = Self {
+            low: 0,
+            high: u32::MAX,
+            code: 0,
+            payload,
+            at: 0,
+        };
+        for _ in 0..4 {
+            decoder.code = decoder.code << 8 | decoder.take();
+        }
+        decoder
+    }
+
+    fn take(&mut self) -> u32 {
+        let byte = self.payload.get(self.at).copied().unwrap_or(0);
+        self.at += 1;
+        u32::from(byte)
+    }
+
+    fn code(&mut self, p: u32) -> u32 {
+        let middle = self.low + ((u64::from(self.high - self.low) * u64::from(p)) >> 12) as u32;
+        let bit = u32::from(self.code <= middle);
+        if bit == 1 {
+            self.high = middle;
+        } else {
+            self.low = middle + 1;
+        }
+        while (self.low ^ self.high) & 0xff00_0000 == 0 {
+            self.low <<= 8;
+            self.high = self.high << 8 | 255;
+            self.code = self.code << 8 | self.take();
+        }
+        bit
+    }
+
+    fn bit(&mut self, model: &mut u16) -> u32 {
+        let bit = self.code(u32::from(*model));
+        if bit == 1 {
+            *model += (4096 - *model) >> RATE;
+        } else {
+            *model -= *model >> RATE;
+        }
+        bit
+    }
+
+    fn tree(&mut self, models: &mut [u16], bits: u32) -> u32 {
+        let mut node = 1usize;
+        for _ in 0..bits {
+            node = node << 1 | self.bit(&mut models[node]) as usize;
+        }
+        node as u32 - (1 << bits)
+    }
+
+    fn plain(&mut self, bits: u32) -> u32 {
+        (0..bits).fold(0, |value, _| value << 1 | self.code(2048))
+    }
+}
+
+/// Chained hash table over four-byte prefixes of the block.
+struct Matches<'a> {
+    bytes: &'a [u8],
+    head: Vec<u32>,
+    previous: Vec<u32>,
+    inserted: usize,
+}
+
+impl<'a> Matches<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self {
+            bytes,
+            head: vec![u32::MAX; 1 << HASH_BITS],
+            previous: vec![u32::MAX; bytes.len()],
+            inserted: 0,
+        }
+    }
+
+    fn slot(&self, at: usize) -> usize {
+        let key = u32::from_le_bytes(self.bytes[at..at + 4].try_into().expect("four bytes"));
+        (key.wrapping_mul(0x9e37_79b1) >> (32 - HASH_BITS)) as usize
+    }
+
+    /// Makes every position below `end` findable.
+    fn insert_until(&mut self, end: usize) {
+        while self.inserted < end && self.inserted + 4 <= self.bytes.len() {
+            let slot = self.slot(self.inserted);
+            self.previous[self.inserted] = self.head[slot];
+            self.head[slot] = self.inserted as u32;
+            self.inserted += 1;
+        }
+        self.inserted = self.inserted.max(end.min(self.bytes.len()));
+    }
+
+    fn common(&self, a: usize, b: usize) -> usize {
+        let limit = (self.bytes.len() - b).min(MAX_MATCH);
+        (0..limit)
+            .find(|&k| self.bytes[a + k] != self.bytes[b + k])
+            .unwrap_or(limit)
+    }
+
+    /// Longest earlier match for position `at` (length, distance); the
+    /// nearest wins ties. `repeat` is the last distance used.
+    fn best(&mut self, at: usize, repeat: usize) -> (usize, usize) {
+        self.insert_until(at);
+        let mut best = (0usize, 0usize);
+        if repeat != 0 && repeat <= at {
+            let length = self.common(at - repeat, at);
+            if length >= MIN_MATCH {
+                best = (length, repeat);
+            }
+        }
+        if at + 4 > self.bytes.len() {
+            return best;
+        }
+        let mut candidate = self.head[self.slot(at)];
+        for _ in 0..CHAIN {
+            if candidate == u32::MAX {
+                break;
+            }
+            let from = candidate as usize;
+            let length = self.common(from, at);
+            // A repeat of the last distance is cheaper: keep it unless the
+            // new match is clearly longer.
+            let needed = if best.1 == repeat && best.0 > 0 { best.0 + 2 } else { best.0 + 1 };
+            if length >= needed.max(MIN_MATCH) {
+                best = (length, at - from);
+            }
+            candidate = self.previous[from];
+        }
+        // A short match far away costs more than its literals.
+        if best.0 == MIN_MATCH && best.1 > 1 << 16 && best.1 != repeat {
+            return (0, 0);
+        }
+        best
+    }
+}
+
+fn match_encode(bytes: &[u8]) -> Vec<u8> {
+    let mut models = BitModels::new();
+    let mut coder = Encoder {
+        low: 0,
+        high: u32::MAX,
+        out: Vec::with_capacity(bytes.len() / 3 + 16),
+    };
+    let mut matches = Matches::new(bytes);
+    let (mut at, mut repeat, mut after_match) = (0usize, 0usize, 0usize);
+    while at < bytes.len() {
+        let (mut length, distance) = matches.best(at, repeat);
+        if length >= MIN_MATCH && at + 1 < bytes.len() {
+            // Lazy step: a longer match one byte later beats this one.
+            let (next, _) = matches.best(at + 1, repeat);
+            if next > length {
+                length = 0;
+            }
+        }
+        if length < MIN_MATCH {
+            coder.bit(&mut models.is_match[after_match], 0);
+            let context = if at == 0 { 0 } else { usize::from(bytes[at - 1] >> 4) };
+            coder.tree(
+                &mut models.literal[context * 256..(context + 1) * 256],
+                8,
+                u32::from(bytes[at]),
+            );
+            after_match = 0;
+            at += 1;
+            continue;
+        }
+        coder.bit(&mut models.is_match[after_match], 1);
+        let repeated = usize::from(distance == repeat);
+        coder.bit(&mut models.is_repeat, repeated as u32);
+        let value = (length - MIN_MATCH) as u32;
+        let choice = &mut models.length_choice[repeated];
+        if value < 8 {
+            coder.bit(&mut choice[0], 0);
+            coder.tree(&mut models.length_low[repeated], 3, value);
+        } else if value < 16 {
+            coder.bit(&mut choice[0], 1);
+            coder.bit(&mut choice[1], 0);
+            coder.tree(&mut models.length_mid[repeated], 3, value - 8);
+        } else {
+            coder.bit(&mut choice[0], 1);
+            coder.bit(&mut choice[1], 1);
+            coder.tree(&mut models.length_high[repeated], 8, value - 16);
+        }
+        if repeated == 0 {
+            let x = distance as u32 - 1;
+            let slot = distance_slot(x);
+            coder.tree(&mut models.slot[(value as usize).min(3)], 6, slot);
+            if slot >= 4 {
+                let extra = (slot >> 1) - 1;
+                let rest = x - ((2 | (slot & 1)) << extra);
+                if extra <= 4 {
+                    let base = slot as usize * 16;
+                    coder.tree(&mut models.special[base..base + 16], extra, rest);
+                } else {
+                    coder.plain(extra - 4, rest >> 4);
+                    coder.tree(&mut models.align, 4, rest & 15);
+                }
+            }
+        }
+        repeat = distance;
+        after_match = 1;
+        at += length;
+    }
+    coder.out.extend_from_slice(&coder.low.to_be_bytes());
+    coder.out
+}
+
+fn match_decode(payload: &[u8], length: usize) -> Option<Vec<u8>> {
+    let mut models = BitModels::new();
+    let mut coder = Decoder::new(payload);
+    let mut out: Vec<u8> = Vec::with_capacity(length);
+    let (mut repeat, mut after_match) = (0usize, 0usize);
+    while out.len() < length {
+        if coder.bit(&mut models.is_match[after_match]) == 0 {
+            let context = out.last().map_or(0, |&byte| usize::from(byte >> 4));
+            let byte = coder.tree(&mut models.literal[context * 256..(context + 1) * 256], 8);
+            out.push(byte as u8);
+            after_match = 0;
+            continue;
+        }
+        let repeated = coder.bit(&mut models.is_repeat) as usize;
+        let choice = &mut models.length_choice[repeated];
+        let value = if coder.bit(&mut choice[0]) == 0 {
+            coder.tree(&mut models.length_low[repeated], 3)
+        } else if coder.bit(&mut choice[1]) == 0 {
+            8 + coder.tree(&mut models.length_mid[repeated], 3)
+        } else {
+            16 + coder.tree(&mut models.length_high[repeated], 8)
+        };
+        if repeated == 0 {
+            let slot = coder.tree(&mut models.slot[(value as usize).min(3)], 6);
+            let x = if slot < 4 {
+                slot
+            } else {
+                let extra = (slot >> 1) - 1;
+                let rest = if extra <= 4 {
+                    let base = slot as usize * 16;
+                    coder.tree(&mut models.special[base..base + 16], extra)
+                } else {
+                    let high = coder.plain(extra - 4);
+                    high << 4 | coder.tree(&mut models.align, 4)
+                };
+                ((2 | (slot & 1)) << extra).checked_add(rest)?
+            };
+            repeat = x as usize + 1;
+        }
+        let count = value as usize + MIN_MATCH;
+        if repeat == 0 || repeat > out.len() || out.len() + count > length {
+            return None;
+        }
+        for _ in 0..count {
+            out.push(out[out.len() - repeat]);
+        }
+        after_match = 1;
+    }
+    Some(out)
+}
+
 // ---------- reversible filters ----------
 
 /// A filter applied to a block before sorting. The packer tries several and
@@ -592,8 +965,12 @@ const MIN_REPEAT: usize = 2048;
 /// Bytes hashed to find a repeat.
 const WINDOW: usize = 32;
 /// Every this many positions enter the table.
-const SAMPLE: usize = 8;
-const TABLE_BITS: u32 = 22;
+const SAMPLE: usize = 4;
+const TABLE_BITS: u32 = 24;
+/// Distance beyond which a repeat's source lies outside the reach of the
+/// block that holds it, and the shortest repeat replaced at that distance.
+const FAR_DISTANCE: usize = 1 << 20;
+const FAR_REPEAT: usize = 40;
 
 fn put_number(out: &mut Vec<u8>, mut value: u64) {
     while value >= 128 {
@@ -651,7 +1028,10 @@ fn remove_repeats(input: &[u8]) -> Vec<u8> {
                 length += 1;
             }
         }
-        if length >= MIN_REPEAT {
+        // A source too far back for the block sort to see is worth a
+        // reference even when the repeat is short.
+        let far = candidate != u32::MAX && i - candidate as usize >= FAR_DISTANCE;
+        if length >= MIN_REPEAT || (far && length >= FAR_REPEAT) {
             put_number(&mut ops, (i - literal_start) as u64);
             put_number(&mut ops, length as u64);
             put_number(&mut ops, (i - candidate as usize) as u64);
@@ -742,6 +1122,10 @@ fn pack_block(block: &[u8]) -> Vec<u8> {
                 eprintln!("{:?} {}", filter.code(), coded.len());
             }
         })
+        // The match coder, plain and after the call filter.
+        .chain([Filter::None, Filter::Calls].into_iter().map(|filter| {
+            (filter, MATCH_CODED, match_encode(&filter.forward(block)))
+        }))
         .min_by_key(|(_, _, coded)| coded.len())
         .expect("the filter list is not empty");
     let mut out = Vec::with_capacity(coded.len() + 22);
@@ -802,7 +1186,11 @@ fn unpack_block(
     let block = match sorted {
         None => payload.to_vec(),
         Some((filter, primary)) => {
-            let mut block = inverse_bwt(&decode_bytes(payload, length), primary)?;
+            let mut block = if primary == MATCH_CODED {
+                match_decode(payload, length)?
+            } else {
+                inverse_bwt(&decode_bytes(payload, length), primary)?
+            };
             filter.inverse(&mut block);
             block
         }
