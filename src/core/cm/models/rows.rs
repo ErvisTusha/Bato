@@ -24,7 +24,7 @@ const SAMPLE_STEP: usize = 61;
 const MAX_RELATIVE_SIXTEENTHS: usize = 9;
 const SALT: u64 = 0x5e17_c3a9_0b42_d6f8;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(in crate::core::cm) struct Rows {
     row: Option<usize>,
     unit: usize,

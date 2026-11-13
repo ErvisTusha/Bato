@@ -30,7 +30,7 @@ enum Class {
     Space = 3,
     Other = 4,
 }
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(in crate::core::cm) struct Words {
     current: u64,
     previous: [u64; 2],

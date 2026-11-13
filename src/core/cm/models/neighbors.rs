@@ -30,6 +30,7 @@ pub(in crate::core::cm) fn memory_required() -> usize {
     (2 * TEMPLATE_CELLS + LARGE_CELLS) * std::mem::size_of::<Cell>()
 }
 
+#[derive(Clone)]
 pub(in crate::core::cm) struct Neighbors {
     cells: [Cell; CELLS],
     /// Template of 4 left pixels, 7 above and 5 two rows above.

@@ -38,6 +38,7 @@ fn entries(length: usize, cap: u8) -> usize {
 pub(in crate::core::cm) fn memory_required(length: usize, cap: u8) -> usize {
     entries(length, cap) * 4
 }
+#[derive(Clone)]
 pub(in crate::core::cm) struct Matcher {
     index: Vec<u32>,
     last_position: usize,

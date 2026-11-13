@@ -16,6 +16,7 @@ use crate::core::{memory::try_filled, types::BatoError};
 const SCALE_BITS: u8 = 2;
 /// log2 of weight 1.0 before `SCALE_BITS`: weights share the 1/256 logit unit.
 const UNIT_BITS: u8 = 8;
+#[derive(Clone)]
 pub(super) struct Mixer {
     weights: Vec<[i16; INPUTS]>,
     selected: usize,

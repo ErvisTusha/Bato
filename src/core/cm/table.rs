@@ -45,6 +45,29 @@ fn bucket_count(length: usize, cap: u8) -> usize {
 pub(super) fn memory_required(length: usize, cap: u8) -> usize {
     bucket_count(length, cap) * std::mem::size_of::<Bucket>()
 }
+impl Clone for Table {
+    /// A second allocation with the same buckets. Like `Vec::clone`, it
+    /// aborts when the allocation fails.
+    fn clone(&self) -> Self {
+        // SAFETY: `layout` is the nonzero-size layout of the live allocation
+        // behind `buckets`; the new block has the same size and alignment, the
+        // two blocks are distinct, and buckets are plain bytes, so copying
+        // `count` of them initialises the new block. Drop releases it.
+        let buckets = unsafe {
+            let pointer = std::alloc::alloc(self.layout).cast::<Bucket>();
+            let Some(buckets) = NonNull::new(pointer) else {
+                std::alloc::handle_alloc_error(self.layout);
+            };
+            std::ptr::copy_nonoverlapping(self.buckets.as_ptr(), buckets.as_ptr(), self.count);
+            buckets
+        };
+        Self {
+            buckets,
+            count: self.count,
+            layout: self.layout,
+        }
+    }
+}
 impl Table {
     pub(super) fn new(length: usize, cap: u8) -> Result<Self, BatoError> {
         let count = bucket_count(length, cap);

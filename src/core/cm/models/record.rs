@@ -71,6 +71,7 @@ impl Vote {
         }
     }
 }
+#[derive(Clone)]
 pub(in crate::core::cm) struct Records {
     recent: [Recent; 256],
     votes: [Vote; VOTE_SLOTS],

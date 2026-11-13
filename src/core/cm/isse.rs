@@ -15,6 +15,7 @@ const LIMIT: i32 = i16::MAX as i32;
 /// Right shift of `error * input` giving one weight update.
 const LEARNING_SHIFT: u32 = 22;
 
+#[derive(Clone)]
 pub(super) struct Isse {
     weights: [[i16; 2]; 256],
     state: usize,

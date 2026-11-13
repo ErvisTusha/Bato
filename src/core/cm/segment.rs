@@ -71,6 +71,28 @@ pub(crate) struct Chunk {
     pub(crate) crc: u32,
 }
 
+/// Largest input whose primed model is kept for the segment's other
+/// candidates of the same length: above it the primer is a negligible share
+/// of the coding time and a second model a large share of the memory.
+const SNAPSHOT_BYTES: usize = 1 << 21;
+
+/// A model trained on the primer, kept so that further candidates of the
+/// same length copy it instead of training again. Copying gives the state
+/// training would, so the archive does not depend on it.
+struct Snapshot {
+    model: Option<(usize, Predictor)>,
+    wanted: bool,
+}
+
+impl Snapshot {
+    fn new(wanted: bool) -> Self {
+        Self {
+            model: None,
+            wanted,
+        }
+    }
+}
+
 /// Whether the encoder may run its independent model trials on two threads.
 /// The archive is the same either way; only the time differs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -233,7 +255,7 @@ pub(crate) fn encode_segment(
                     descriptor.segment_bytes() * DEFLATE_EXPANSION,
                 ),
                 winner.0,
-                timing,
+                (timing, &mut Snapshot::new(false)),
             )? {
                 winner = (
                     cost,
@@ -247,6 +269,12 @@ pub(crate) fn encode_segment(
         }
     }
     let min_frame = minimum(raw.len());
+    // Two or more primed candidates of this length follow: train once.
+    let mut snapshot = Snapshot::new(
+        raw.len() <= SNAPSHOT_BYTES
+            && trials == Trials::Parallel
+            && (x86.is_some() || filters::CANDIDATES.contains(&selected_filter)),
+    );
     if min_frame < winner.0 {
         if let Some(sites) = x86 {
             x86::forward(raw, sites);
@@ -254,7 +282,7 @@ pub(crate) fn encode_segment(
                 raw,
                 (descriptor, trials, descriptor.segment_bytes()),
                 winner.0,
-                timing,
+                (timing, &mut snapshot),
             );
             // Even when coding errors, leave the caller's input intact.
             x86::inverse(raw, sites);
@@ -284,7 +312,7 @@ pub(crate) fn encode_segment(
             &transformed,
             (descriptor, trials, descriptor.segment_bytes()),
             winner.0,
-            timing,
+            (timing, &mut snapshot),
         )? {
             for (chunk, bytes) in chunks.iter_mut().zip(raw.chunks(descriptor.chunk_bytes())) {
                 chunk.crc = crc32c(bytes);
@@ -304,7 +332,7 @@ pub(crate) fn encode_segment(
             raw,
             (descriptor, trials, descriptor.segment_bytes()),
             winner.0,
-            timing,
+            (timing, &mut snapshot),
         )? {
             winner = (
                 cost,
@@ -328,9 +356,12 @@ fn model_candidate(
     input: &[u8],
     (descriptor, trials, max_bytes): (Descriptor, Trials, usize),
     limit: usize,
-    timing: Timing<'_>,
+    (timing, snapshot): (Timing<'_>, &mut Snapshot),
 ) -> Result<Option<(usize, Primer, Vec<Chunk>)>, BatoError> {
-    let run = |primer, cap| -> Result<Option<(usize, Primer, Vec<Chunk>)>, BatoError> {
+    let run = |primer,
+               cap,
+               snapshot: Option<&mut Snapshot>|
+     -> Result<Option<(usize, Primer, Vec<Chunk>)>, BatoError> {
         let run = Run {
             primer,
             dispatch: Dispatch::Native,
@@ -338,26 +369,26 @@ fn model_candidate(
             max_bytes,
             timing,
         };
-        let chunks = encode_model(input, descriptor, run)?;
+        let chunks = encode_model(input, descriptor, run, snapshot)?;
         Ok(chunks.map(|chunks| (chunks_cost(&chunks), primer, chunks)))
     };
     let outcomes: Vec<Option<(usize, Primer, Vec<Chunk>)>> = if input.len() > UNPRIMED_TRIAL_BYTES {
-        vec![run(Primer::Read, limit)?]
+        vec![run(Primer::Read, limit, Some(snapshot))?]
     } else if trials == Trials::Parallel {
         let (primed, unprimed) = std::thread::scope(|scope| {
-            let unprimed = scope.spawn(|| run(Primer::Skipped, limit));
-            (run(Primer::Read, limit), unprimed.join())
+            let unprimed = scope.spawn(|| run(Primer::Skipped, limit, None));
+            (run(Primer::Read, limit, Some(snapshot)), unprimed.join())
         });
         let unprimed =
             unprimed.map_err(|_| BatoError::CorruptStream("model trial thread panicked".into()))?;
         vec![primed?, unprimed?]
     } else {
-        let primed = run(Primer::Read, limit)?;
+        let primed = run(Primer::Read, limit, Some(snapshot))?;
         // The unprimed trial can only win by being strictly cheaper. Passing
         // this proven bound avoids modeling its remaining bytes after it can
         // no longer win; it does not change the winner or archive format.
         let cap = primed.as_ref().map_or(limit, |(cost, ..)| *cost);
-        let unprimed = run(Primer::Skipped, cap)?;
+        let unprimed = run(Primer::Skipped, cap, None)?;
         vec![primed, unprimed]
     };
     let mut cheapest: Option<(usize, Primer, Vec<Chunk>)> = None;
@@ -460,13 +491,14 @@ fn encode_with_dispatch(
         max_bytes: descriptor.segment_bytes(),
         timing: Timing::off(),
     };
-    encode_model(raw, descriptor, run)?
+    encode_model(raw, descriptor, run, None)?
         .ok_or_else(|| BatoError::CorruptStream("unbounded model encoding aborted".into()))
 }
 fn encode_model(
     raw: &[u8],
     descriptor: Descriptor,
     run: Run<'_>,
+    snapshot: Option<&mut Snapshot>,
 ) -> Result<Option<Vec<Chunk>>, BatoError> {
     let primer = primer_bytes(run.primer);
     descriptor.validate()?;
@@ -478,16 +510,27 @@ fn encode_model(
     if raw.is_empty() {
         return Ok(Some(Vec::new()));
     }
-    let mut model = Predictor::new(
-        primer.len() + raw.len(),
-        descriptor.table_log2,
-        run.dispatch,
-    )?;
-    let mut history = try_capacity(primer.len() + raw.len())?;
+    let total = primer.len() + raw.len();
+    let kept = snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.model.as_ref())
+        .filter(|(length, _)| *length == total)
+        .map(|(_, model)| model.clone());
+    let mut model = match kept {
+        Some(model) => model,
+        None => {
+            let mut model = Predictor::new(total, descriptor.table_log2, run.dispatch)?;
+            run.timing
+                .time(Step::PrimerTraining, || prime(&mut model, primer));
+            if let Some(snapshot) = snapshot.filter(|snapshot| snapshot.wanted) {
+                snapshot.model = Some((total, model.clone()));
+            }
+            model
+        }
+    };
+    let mut history = try_capacity(total)?;
     history.extend_from_slice(primer);
     history.extend_from_slice(raw);
-    run.timing
-        .time(Step::PrimerTraining, || prime(&mut model, primer));
     if run.timing.enabled() {
         model.start_meter();
     }
@@ -722,7 +765,7 @@ mod tests {
                 max_bytes: descriptor.segment_bytes(),
                 timing: Timing::off(),
             };
-            encode_model(&raw, descriptor, run).unwrap().unwrap()
+            encode_model(&raw, descriptor, run, None).unwrap().unwrap()
         };
         let (primed, unprimed) = (encode_with(Primer::Read), encode_with(Primer::Skipped));
         assert_ne!(primed[0].payload, unprimed[0].payload);
@@ -798,7 +841,7 @@ mod tests {
             &raw,
             (descriptor, Trials::Sequential, descriptor.segment_bytes()),
             usize::MAX,
-            Timing::off(),
+            (Timing::off(), &mut Snapshot::new(false)),
         )
         .unwrap()
         .unwrap()

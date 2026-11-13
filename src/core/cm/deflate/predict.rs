@@ -88,6 +88,7 @@ fn match_length(data: &[u8], start: usize, at: usize, limit: usize) -> usize {
     matched
 }
 
+#[derive(Clone)]
 pub(super) struct Predictor<'a> {
     data: &'a [u8],
     params: Params,

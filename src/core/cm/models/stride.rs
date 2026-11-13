@@ -36,7 +36,7 @@ struct Vote {
     count: u16,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(in crate::core::cm) struct Stride {
     votes: [Vote; VOTE_SLOTS],
     lag: Option<usize>,

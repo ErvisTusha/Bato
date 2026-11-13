@@ -70,6 +70,7 @@ impl Cell {
         self.0 = (next << COUNT_BITS) | (count + 1).min(u32::from(limit).min(COUNT_MAX));
     }
 }
+#[derive(Clone)]
 pub(super) struct StateMap {
     cells: [Cell; 256],
 }
@@ -91,7 +92,7 @@ impl StateMap {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(super) struct RunMap {
     byte: u8,
     length: u16,

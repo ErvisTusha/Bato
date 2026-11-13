@@ -708,6 +708,16 @@ noise; `sao` itself packs in 65.4 s against 49.5 s and unpacks in 55.0 s
 against 43.2 s (+27%, single runs), because the row expert and the templates
 are now active on it.
 
+## One primer training per segment for same-length candidates (2026-11-13)
+
+Format 1.20 unchanged, archives byte-identical. For inputs up to 2 MiB with
+two or more primed candidates of the same length (x86, filter, plain), the
+model is trained on the primer once and copied. Pack wall seconds, mean of
+three runs, default threads: 159 KB executable 3.12 to 2.71 (-13%);
+`hopper.bmp` 1.82 to 1.28 (-30%); `sample-3s.wav` 8.52 to 8.15 (-4%); `bash`
+executable (1.4 MB) 17.2 to 16.8 (-2%). Files with one candidate (text) and
+unpacking are unchanged. One extra model is held in memory meanwhile.
+
 ## Rejected experiments (kept so they are not repeated)
 
 * **Early exit for incompressible chunks** (abort the model attempt after two
@@ -789,4 +799,10 @@ are now active on it.
   1,183,086 (+0.37%) / 8.2; 8,192 bytes 1,183,697 (+0.42%) / 8.7; none
   1,186,034 (+0.62%) / 7.8. Fourteen files grow in every variant and none
   shrinks without the primer. Size outranks unpack time, so the primer stays.
+* **Every byte filter through the model** (not only the one the independent
+  codec picks), format 1.20. Forcing each of the five filters over 122 small
+  files: beyond the picked filter the best choice saves 25 bytes on one WOFF
+  file and nothing elsewhere, for up to five more model runs per file.
+* **"Learn on the data first, then code it"** cannot work: the decoder does
+  not have the data to learn from.
 

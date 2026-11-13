@@ -15,6 +15,7 @@ const BIN_WIDTH: u16 = 1 << BIN_SHIFT;
 const INITIAL_COUNT: u16 = 16;
 /// Count limit: the bins' adaptation rate settles near 1/512.
 const LIMIT: u16 = 512;
+#[derive(Clone)]
 pub(super) struct Apm {
     cells: Vec<Cell>,
     mask: usize,

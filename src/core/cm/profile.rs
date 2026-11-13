@@ -204,6 +204,7 @@ impl Part {
 }
 
 /// Per-thread accumulator the predictor laps while a sampled byte is coded.
+#[derive(Clone)]
 pub(super) struct Meter {
     last: Instant,
     sampled: bool,

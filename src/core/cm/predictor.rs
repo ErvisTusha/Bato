@@ -86,6 +86,7 @@ const MISSING_BYTE: u64 = 0x1ff;
 const SPARSE_SALT: u64 = 0x7a3c_91e4_0000_0000;
 /// Hashed byte orders of the text expert.
 const TEXT_ORDERS: [usize; 2] = [5, 7];
+#[derive(Clone)]
 pub(super) struct Predictor {
     table: Table,
     maps: [ContextMap; CONTEXTS],

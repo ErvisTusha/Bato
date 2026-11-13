@@ -27,6 +27,7 @@ pub(super) const NIBBLE_BITS: usize = 4;
 // every context on every encoded or decoded bit.
 static FIXED_FEATURES: OnceLock<[[i16; 2]; 256]> = OnceLock::new();
 
+#[derive(Clone)]
 pub(super) struct ContextMap {
     maps: [StateMap; 8],
     fixed_features: &'static [[i16; 2]; 256],
