@@ -852,4 +852,17 @@ first two take the concurrent path; the rest are run-to-run noise.
   as many equal bytes: `kennedy.xls` 13,199, `sao` sample -456 bytes, but
   `ptt5` +26, `kodim09.ppm` +69, `vgl_6548.bmp` +24: images also repeat at
   divisors of their row. Not kept.
+* **`bato-next`, a from-scratch rewrite with a different method** (branch
+  `experiment/next`, 2026-11-13): block sorting per 16 MiB block with a small
+  bitwise model, a match coder as a second method per block, size-selected
+  filters and references to far repeats. Against format 1.20, single runs,
+  all restored: `osdb` 2,181,815 against 2,251,424 (-3.1%), `nci` 1,249,847
+  against 1,218,062 (+2.6%), `dickens` 2,224,509 against 2,121,780 (+4.8%),
+  `webster` +17.1%, `samba` +42%, `mozilla` +51.9%, Go tree as one file
+  45,601,957 against 33,782,384 (+35%). It unpacks 9 to 23 times faster than
+  1.20 (Go tree 24.3 s against 564.65 s) but `xz -9e` is smaller on mixed
+  data (Go tree 39,725,940, unpack 2.28 s; `mozilla` 13,376,240; `samba`
+  3,739,524) and faster in both directions. Not continued: on Bato's main
+  use, folders of mixed files, it loses to xz on size, pack time and unpack
+  time, and to 1.20 on size.
 
