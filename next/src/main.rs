@@ -452,7 +452,6 @@ struct BitModels {
     is_repeat: u16,
     /// Which of the four last distances a repeat uses.
     repeat_index: [u16; 4],
-    literal: Vec<u16>,
     length_choice: [[u16; 2]; 2],
     length_low: [[u16; 8]; 2],
     length_mid: [[u16; 8]; 2],
@@ -468,7 +467,6 @@ impl BitModels {
             is_match: [[2048; 4]; 2],
             is_repeat: 2048,
             repeat_index: [2048; 4],
-            literal: vec![2048; 16 * 0x300],
             length_choice: [[2048; 2]; 2],
             length_low: [[2048; 8]; 2],
             length_mid: [[2048; 8]; 2],
@@ -640,21 +638,6 @@ impl Encoder {
             self.code((value >> shift) & 1, 2048);
         }
     }
-
-    /// A literal right after a match: the byte the last distance points at
-    /// usually shares its leading bits, so they select the models until the
-    /// first difference (the matched-literal scheme documented for LZMA).
-    fn matched(&mut self, models: &mut [u16], byte: u8, guess: u8) {
-        let (mut offset, mut symbol, mut guess) = (0x100usize, 1usize, usize::from(guess));
-        for shift in (0..8).rev() {
-            guess <<= 1;
-            let guessed = guess & offset;
-            let bit = usize::from(byte >> shift) & 1;
-            self.bit(&mut models[offset + guessed + symbol], bit as u32);
-            symbol = symbol << 1 | bit;
-            offset &= if bit == 1 { guessed } else { !guessed };
-        }
-    }
 }
 
 struct Decoder<'a> {
@@ -722,18 +705,6 @@ impl<'a> Decoder<'a> {
 
     fn plain(&mut self, bits: u32) -> u32 {
         (0..bits).fold(0, |value, _| value << 1 | self.code(2048))
-    }
-
-    fn matched(&mut self, models: &mut [u16], guess: u8) -> u8 {
-        let (mut offset, mut symbol, mut guess) = (0x100usize, 1usize, usize::from(guess));
-        for _ in 0..8 {
-            guess <<= 1;
-            let guessed = guess & offset;
-            let bit = self.bit(&mut models[offset + guessed + symbol]) as usize;
-            symbol = symbol << 1 | bit;
-            offset &= if bit == 1 { guessed } else { !guessed };
-        }
-        symbol as u8
     }
 }
 
@@ -1273,6 +1244,99 @@ fn restore_repeats(stream: &[u8]) -> Option<Vec<u8>> {
     (out.len() == total && literals.is_empty() && op == ops.len()).then_some(out)
 }
 
+// ---------- measurement ----------
+
+/// Stages of packing a block, timed when `NEXT_TRACE` is set.
+#[derive(Clone, Copy)]
+enum Stage {
+    Filter,
+    Sort,
+    SortedCoding,
+    MatchCoding,
+}
+
+/// Running totals for the `NEXT_TRACE` report: microseconds per stage (summed
+/// over threads) and input and output bytes per method.
+struct Stats;
+
+static STAGE_MICROS: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+static METHOD_BYTES: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+
+impl Stats {
+    fn enabled() -> bool {
+        std::env::var_os("NEXT_TRACE").is_some()
+    }
+
+    fn time<R>(stage: Stage, work: impl FnOnce() -> R) -> R {
+        let start = std::time::Instant::now();
+        let result = work();
+        STAGE_MICROS[stage as usize]
+            .fetch_add(start.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
+        result
+    }
+
+    fn note(label: &str, filter: Filter, size: usize) {
+        if Self::enabled() {
+            eprintln!("  trial {label} {:?} -> {size}", filter.code());
+        }
+    }
+
+    fn chosen(matched: bool, input: usize, output: usize) {
+        let at = 2 * usize::from(matched);
+        METHOD_BYTES[at].fetch_add(input as u64, std::sync::atomic::Ordering::Relaxed);
+        METHOD_BYTES[at + 1].fetch_add(output as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn report() {
+        if !Self::enabled() {
+            return;
+        }
+        let load = |cell: &std::sync::atomic::AtomicU64| cell.load(std::sync::atomic::Ordering::Relaxed);
+        let names = ["filters", "sorting", "coding sorted bytes", "match coding"];
+        for (name, cell) in names.iter().zip(&STAGE_MICROS) {
+            eprintln!("stage {name:20} {:8.2} s (all threads)", load(cell) as f64 / 1e6);
+        }
+        eprintln!("blocks sorted:      {} -> {} bytes", load(&METHOD_BYTES[0]), load(&METHOD_BYTES[1]));
+        eprintln!("blocks match-coded: {} -> {} bytes", load(&METHOD_BYTES[2]), load(&METHOD_BYTES[3]));
+    }
+}
+
+/// Up to three 256 KiB slices of a block, for quick estimates.
+fn sample(block: &[u8]) -> Vec<u8> {
+    const SLICE: usize = 1 << 18;
+    if block.len() <= 4 * SLICE {
+        return block.to_vec();
+    }
+    let starts = [0, block.len() / 2 - SLICE / 2, block.len() - SLICE];
+    starts.iter().flat_map(|&start| &block[start..start + SLICE]).copied().collect()
+}
+
+/// Bits needed for `bytes` when each byte is coded from the counts of bytes
+/// that followed the same previous byte: a cheap stand-in for a full trial.
+fn estimate(bytes: &[u8]) -> u64 {
+    let bytes = if bytes.len() > 1 << 20 { sample(bytes) } else { bytes.to_vec() };
+    let mut counts = vec![0u32; 1 << 16];
+    for pair in bytes.windows(2) {
+        counts[usize::from(pair[0]) << 8 | usize::from(pair[1])] += 1;
+    }
+    // log2 in 1/16 bit steps, integer only.
+    let log2 = |value: u32| -> u64 {
+        let top = 31 - value.max(1).leading_zeros();
+        let fraction = if top >= 4 { (value >> (top - 4)) & 15 } else { (value << (4 - top)) & 15 };
+        u64::from(top * 16 + fraction)
+    };
+    counts
+        .chunks(256)
+        .map(|row| {
+            let total: u32 = row.iter().sum();
+            row.iter()
+                .filter(|&&count| count > 0)
+                .map(|&count| u64::from(count) * (log2(total) - log2(count)))
+                .sum::<u64>()
+        })
+        .sum()
+}
+
 // ---------- container ----------
 
 fn pack_block(block: &[u8]) -> Vec<u8> {
@@ -1290,29 +1354,44 @@ fn pack_block(block: &[u8]) -> Vec<u8> {
             filters.extend([Filter::Columns(distance), Filter::ColumnDeltas(distance)]);
         }
     }
-    // Every filter is tried in full; the smallest coded block wins and the
-    // first of equals is kept.
-    let (filter, primary, coded) = filters
-        .into_iter()
-        .map(|filter| {
-            let (last, primary) = forward_bwt(&filter.forward(block));
-            (filter, primary, encode_bytes(&last))
-        })
-        .inspect(|(filter, _, coded)| {
-            if std::env::var_os("NEXT_TRACE").is_some() {
-                eprintln!("{:?} {}", filter.code(), coded.len());
-            }
-        })
-        // The match coder, plain and after the call filter.
-        .chain([Filter::None, Filter::Calls].into_iter().map(|filter| {
-            let coded = match_encode(&filter.forward(block));
-            if std::env::var_os("NEXT_TRACE").is_some() {
-                eprintln!("match {:?} {}", filter.code(), coded.len());
-            }
-            (filter, MATCH_CODED, coded)
-        }))
-        .min_by_key(|(_, _, coded)| coded.len())
-        .expect("the filter list is not empty");
+    // A quick estimate (bits per byte given the previous byte, on samples)
+    // picks which filters deserve a full trial: the plain block and the call
+    // filter always, and the three best of the others when they beat plain.
+    let plain = estimate(block);
+    let mut scored: Vec<(u64, Filter)> = filters[2..]
+        .iter()
+        .map(|&filter| (estimate(&filter.forward(&sample(block))), filter))
+        .filter(|&(score, _)| score < plain)
+        .collect();
+    scored.sort_by_key(|&(score, _)| score);
+    let trials = filters[..2].iter().copied().chain(scored.iter().take(3).map(|&(_, filter)| filter));
+    // Each chosen filter is tried in full with block sorting; the smallest
+    // coded block wins and the first of equals is kept.
+    let mut best: Option<(Filter, u32, Vec<u8>)> = None;
+    let mut keep = |candidate: (Filter, u32, Vec<u8>)| {
+        let label = if candidate.1 == MATCH_CODED { "match" } else { "sort" };
+        Stats::note(label, candidate.0, candidate.2.len());
+        if best.as_ref().is_none_or(|(_, _, coded)| candidate.2.len() < coded.len()) {
+            best = Some(candidate);
+        }
+    };
+    let mut sorted_sizes = [usize::MAX; 2];
+    for (index, filter) in trials.enumerate() {
+        let filtered = Stats::time(Stage::Filter, || filter.forward(block));
+        let (last, primary) = Stats::time(Stage::Sort, || forward_bwt(&filtered));
+        let coded = Stats::time(Stage::SortedCoding, || encode_bytes(&last));
+        if index < 2 {
+            sorted_sizes[index] = coded.len();
+        }
+        keep((filter, primary, coded));
+    }
+    // The match coder, after whichever of plain and the call filter sorted
+    // smaller.
+    let filter = if sorted_sizes[1] < sorted_sizes[0] { Filter::Calls } else { Filter::None };
+    let coded = Stats::time(Stage::MatchCoding, || match_encode(&filter.forward(block)));
+    keep((filter, MATCH_CODED, coded));
+    let (filter, primary, coded) = best.expect("at least the plain block was tried");
+    Stats::chosen(primary == MATCH_CODED, block.len(), coded.len());
     let mut out = Vec::with_capacity(coded.len() + 22);
     out.extend_from_slice(&(block.len() as u32).to_le_bytes());
     out.extend_from_slice(&crc32(block).to_le_bytes());
@@ -1447,6 +1526,7 @@ fn main() {
         };
         output
     };
+    Stats::report();
     std::fs::File::create(&args[3])
         .and_then(|mut file| file.write_all(&output))
         .unwrap_or_else(|error| {
