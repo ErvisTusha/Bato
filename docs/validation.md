@@ -827,4 +827,11 @@ first two take the concurrent path; the rest are run-to-run noise.
   each map's work is a table lookup, a state-indexed probability and a
   256-entry feature lookup, so a vector version would consist of gathers,
   which are no faster than the scalar loads.
+* **Final mixer selected by the bit neighbourhood**, format 1.20. Replacing
+  the match-state selector while the neighbourhood model is active: `ptt5`
+  24,302 to 23,633 but `kennedy.xls` +39, `hopper.bmp` +140, `geo` +72 bytes.
+  As a third final mixer averaged in while active: `ptt5` 23,646 (-2.7%),
+  `kennedy.xls` 13,180 (-0.85%), `kodim09.ppm` -0.23%, but the 24-file set
+  grows by 356 bytes (one zip +339) and on the 103 development files 27 grow
+  against 14 that shrink (total -361 bytes). No clear gain overall.
 
