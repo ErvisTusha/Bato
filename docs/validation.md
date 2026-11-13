@@ -817,4 +817,14 @@ first two take the concurrent path; the rest are run-to-run noise.
   file and nothing elsewhere, for up to five more model runs per file.
 * **"Learn on the data first, then code it"** cannot work: the decoder does
   not have the data to learn from.
+* **Skipping mixer updates that move no weight** (error times the largest
+  input below half a rounding unit), format 1.20. Archives identical; unpack
+  seconds, three runs each, before and after: `alice29.txt` 1.48 / 1.44 / 1.43
+  and 1.47 / 1.45 / 1.46; `bash` executable 8.90 / 9.78 / 9.10 and 9.42 / 8.94
+  / 9.82; `kennedy.xls` 6.27 / 6.60 / 6.42 and 6.62 / 6.37 / 6.33. No gain:
+  the condition needs a prediction more than 99% right, which is too rare.
+* **Vector instructions across context maps** was examined and not built:
+  each map's work is a table lookup, a state-indexed probability and a
+  256-entry feature lookup, so a vector version would consist of gathers,
+  which are no faster than the scalar loads.
 
