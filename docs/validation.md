@@ -680,6 +680,34 @@ zip -9 / xz -9e): xml 455,003 / 484,666 / 662,418 / 434,892; ooffice
 / 1,820,972 / 1,315,592; sao 4,413,926 / 5,542,627 / 5,327,175 / 4,425,664.
 Bato loses on `sao` to 7z by 0.34% and to xz by 0.07%.
 
+## Record periods from equal bytes, format 1.20 (2026-11-13)
+
+On `sao` (28-byte star records) no record-oriented model was active: its
+bytes often equal the byte one record back (21% against 0.4% at other
+distances) but their differences are not small, which the row expert's
+difference test requires. The row expert now falls back to the shortest
+distance with nearly the most equal samples, and the bit-neighbourhood
+templates use the row expert's distance when the record model has none.
+Against commit 6b0273b, every output restored and compared:
+
+| Data | Before | After | Change |
+|---|---|---|---|
+| `sao` (7,251,944 bytes) | 4,428,723 | 4,023,509 | -9.15% |
+| `kodim09.ppm` | 362,698 | 355,530 | -2.0% |
+| `hopper.bmp` | 23,624 | 23,217 | -1.7% |
+| `geo` | 45,817 | 45,760 | -0.1% |
+| `ptt5` | 24,330 | 24,302 | -0.1% |
+| `kennedy.xls` | 13,293 | 13,293 | 0 |
+| 24 files of different types | 1,178,783 | 1,178,618 | -0.01% |
+| 103 development files | 1,355,978 | 1,352,269 | -0.27% |
+
+One file of the 24 grows by 7 bytes; no development file grows. On `sao` Bato
+is now 8.85% smaller than `7z -mx9` (4,413,926) and 9.09% smaller than
+`xz -9e` (4,425,664); before it lost to both. Time: both sets unchanged within
+noise; `sao` itself packs in 65.4 s against 49.5 s and unpacks in 55.0 s
+against 43.2 s (+27%, single runs), because the row expert and the templates
+are now active on it.
+
 ## Rejected experiments (kept so they are not repeated)
 
 * **Early exit for incompressible chunks** (abort the model attempt after two

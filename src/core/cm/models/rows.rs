@@ -49,10 +49,12 @@ const BLOCK_SAMPLES: usize = 256;
 /// by `MAX_ROW - lag`. Walking the earlier bytes of each sample contiguously
 /// and summing in 16-bit lanes lets the compiler vectorise the sums sixteen
 /// bytes at a time; the totals equal `difference`'s.
-fn row_differences(history: &[u8]) -> Vec<u32> {
+fn row_differences(history: &[u8]) -> (Vec<u32>, Vec<u16>) {
     let end = history.len();
     let mut sums = vec![0u32; MAX_ROW - MIN_ROW + 1];
     let mut block = vec![0u16; MAX_ROW - MIN_ROW + 1];
+    // Samples equal to the byte one distance back; at most `SAMPLES`.
+    let mut equal = vec![0u16; MAX_ROW - MIN_ROW + 1];
     for first in (0..SAMPLES).step_by(BLOCK_SAMPLES) {
         block.fill(0);
         for k in first..(first + BLOCK_SAMPLES).min(SAMPLES) {
@@ -63,12 +65,38 @@ fn row_differences(history: &[u8]) -> Vec<u32> {
             for (sum, &byte) in block.iter_mut().zip(earlier) {
                 *sum += u16::from(current.abs_diff(byte));
             }
+            for (count, &byte) in equal.iter_mut().zip(earlier) {
+                *count += u16::from(current == byte);
+            }
         }
         for (sum, &part) in sums.iter_mut().zip(&block) {
             *sum += u32::from(part);
         }
     }
-    sums
+    (sums, equal)
+}
+
+/// Fewest equal samples (of `SAMPLES`) for a record period.
+const MIN_EQUAL: u16 = 32;
+/// A record period's equal samples must exceed this multiple of the median
+/// distance's.
+const EQUAL_RATIO: u16 = 8;
+
+/// The record period of data whose bytes often equal the byte one record
+/// back although their differences are not small (numeric tables): the
+/// shortest distance with nearly the most equal samples, when that count
+/// stands far above the typical distance's. `equal` is indexed by
+/// `MAX_ROW - distance`.
+fn record_period(equal: &[u16]) -> Option<usize> {
+    let best = equal.iter().copied().max()?;
+    let mut sorted = equal.to_vec();
+    let middle = sorted.len() / 2;
+    let median = *sorted.select_nth_unstable(middle).1;
+    if best < MIN_EQUAL || best <= median.saturating_mul(EQUAL_RATIO) {
+        return None;
+    }
+    // Multiples of the period score alike; the shortest is the period.
+    (MIN_ROW..=MAX_ROW).find(|lag| u32::from(equal[MAX_ROW - lag]) * 16 >= u32::from(best) * 15)
 }
 
 /// A signed difference reduced to 4 bits, finer near zero.
@@ -99,7 +127,7 @@ impl Rows {
             .map(|lag| (difference(history, lag), lag))
             .min()
             .map_or(1, |(_, lag)| lag);
-        let sums = row_differences(history);
+        let (sums, equal) = row_differences(history);
         let mut scores: Vec<(usize, usize)> = (MIN_ROW..=MAX_ROW)
             .filter(|lag| lag % self.unit == 0)
             .map(|lag| (sums[MAX_ROW - lag] as usize, lag))
@@ -110,6 +138,10 @@ impl Rows {
         self.row = best
             .filter(|&(score, _)| score * 16 <= median * MAX_RELATIVE_SIXTEENTHS)
             .map(|(_, lag)| lag);
+        if self.row.is_none() {
+            self.row = record_period(&equal);
+            self.unit = self.row.map_or(self.unit, |_| 1);
+        }
     }
 
     pub(in crate::core::cm) fn begin_byte(&mut self, history: &[u8]) {
@@ -117,6 +149,11 @@ impl Rows {
             self.next_scan = history.len() + SCAN_INTERVAL;
             self.scan(history);
         }
+    }
+
+    /// The row distance, when one is known.
+    pub(in crate::core::cm) fn period(&self) -> Option<usize> {
+        self.row
     }
 
     /// Whether a row distance is known.

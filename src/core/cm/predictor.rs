@@ -269,7 +269,8 @@ impl Predictor {
             let record = self.records.begin_byte(history);
             self.record_active = record.is_some();
             self.record_base = record.unwrap_or(0);
-            self.neighbors.begin_byte(history, self.records.period());
+            self.neighbors
+                .begin_byte(history, self.records.period().or(self.rows.period()));
             self.lap(Step::ByteRecords);
         }
         // The calibration rows are known now; load them while the contexts

@@ -32,5 +32,5 @@ fn check(expected: &str) {
 
 #[test]
 fn complete_encoded_bytes_are_pinned() {
-    check("8e1b582562b811f24afe5d53477a177024c8e347597a1dc1ca79ca4783eba9f4");
+    check("a68fdaee8c1f56742ac437603fdc880e6cb3fcfe096315ebd3e2c6819d4a642b");
 }
