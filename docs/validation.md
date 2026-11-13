@@ -845,4 +845,11 @@ first two take the concurrent path; the rest are run-to-run noise.
   4,475,938 bytes against 4,023,509 as records (+11.2%); pack 44.0 s against
   65.4 s, unpack 40.8 s against 55.0 s. The columns lose what the record
   model learns across fields.
+* **Shortest record length for the row expert**, format 1.20. `kennedy.xls`
+  has 13-byte records (87% of bytes equal the byte 13 back) but the row
+  expert picks 26 because its sample unit is 2. Forcing 13 gives 13,037
+  bytes against 13,293 (-1.9%). Preferring the shortest divisor with nearly
+  as many equal bytes: `kennedy.xls` 13,199, `sao` sample -456 bytes, but
+  `ptt5` +26, `kodim09.ppm` +69, `vgl_6548.bmp` +24: images also repeat at
+  divisors of their row. Not kept.
 
