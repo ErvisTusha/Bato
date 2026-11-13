@@ -437,19 +437,21 @@ fn decode_bytes(payload: &[u8], length: usize) -> Vec<u8> {
 // and the general literal/match/repeat-distance modelling described for
 // LZMA in public documentation; the models, parser and Rust are original.
 
-const MIN_MATCH: usize = 4;
+const MIN_MATCH: usize = 3;
 const MAX_MATCH: usize = MIN_MATCH + 271;
 const HASH_BITS: u32 = 20;
 /// Earlier positions examined per match search.
-const CHAIN: usize = 96;
+const CHAIN: usize = 256;
 /// Adaptation shift of the bit models.
 const RATE: u32 = 5;
 /// Marks a match-coded block where a sorted block stores its row.
 const MATCH_CODED: u32 = u32::MAX;
 
 struct BitModels {
-    is_match: [u16; 2],
+    is_match: [[u16; 4]; 2],
     is_repeat: u16,
+    /// Which of the four last distances a repeat uses.
+    repeat_index: [u16; 4],
     literal: Vec<u16>,
     length_choice: [[u16; 2]; 2],
     length_low: [[u16; 8]; 2],
@@ -463,9 +465,10 @@ struct BitModels {
 impl BitModels {
     fn new() -> Self {
         Self {
-            is_match: [2048; 2],
+            is_match: [[2048; 4]; 2],
             is_repeat: 2048,
-            literal: vec![2048; 16 * 256],
+            repeat_index: [2048; 4],
+            literal: vec![2048; 16 * 0x300],
             length_choice: [[2048; 2]; 2],
             length_low: [[2048; 8]; 2],
             length_mid: [[2048; 8]; 2],
@@ -475,6 +478,112 @@ impl BitModels {
             align: [2048; 16],
         }
     }
+}
+
+/// Literal bits predicted by mixing three views: the previous byte, the two
+/// previous bytes, and the byte the last match distance points at (while it
+/// still agrees with the bits coded so far). Match coders usually code
+/// literals from one context; mixing several is what context-mixing
+/// compressors do, applied here only to the literals.
+struct Literals {
+    stretch: Vec<i16>,
+    order1: Vec<u16>,
+    order2: Vec<u16>,
+    guessed: Vec<u16>,
+    order3: Vec<u16>,
+    aligned: Vec<u16>,
+    weights: Vec<i32>,
+    slots: [usize; 5],
+    inputs: [i32; 6],
+    set: usize,
+    mixed: i32,
+}
+
+impl Literals {
+    fn new() -> Self {
+        let mut stretch = vec![0i16; 4096];
+        let mut filled = 0usize;
+        for d in -2047..=2047 {
+            let v = squash(d) as usize;
+            for slot in &mut stretch[filled..=v] {
+                *slot = d as i16;
+            }
+            filled = v + 1;
+        }
+        for slot in &mut stretch[filled..] {
+            *slot = 2047;
+        }
+        Self {
+            stretch,
+            order1: vec![2048; 1 << 16],
+            order2: vec![2048; 1 << 22],
+            guessed: vec![2048; 1 << 17],
+            order3: vec![2048; 1 << 22],
+            aligned: vec![2048; 1 << 18],
+            weights: vec![1 << 14; 2048 * 6],
+            slots: [0; 5],
+            inputs: [0; 6],
+            set: 0,
+            mixed: 2048,
+        }
+    }
+
+    /// Probability (12 bits) of a one after the `node` bits of this literal.
+    /// `guess` is the expected byte, if the coded bits still agree with it.
+    fn predict(&mut self, (c1, c2, c3, at): (usize, usize, usize, usize), guess: Option<u8>, node: usize) -> u32 {
+        let pair = (c2.wrapping_mul(0x2f0b) ^ c1) & 0x3fff;
+        let (agrees, expected) = match guess {
+            Some(byte) => (1, usize::from(byte)),
+            None => (0, 0),
+        };
+        let triple = (c3.wrapping_mul(0x9e5b) ^ c2.wrapping_mul(0x2f0b) ^ c1) & 0x3fff;
+        self.slots = [
+            c1 << 8 | node,
+            pair << 8 | node,
+            (agrees << 8 | expected) << 8 | node,
+            triple << 8 | node,
+            ((at & 3) << 8 | c1) << 8 | node,
+        ];
+        let tables = [&self.order1, &self.order2, &self.guessed, &self.order3, &self.aligned];
+        for (input, (table, &slot)) in self.inputs.iter_mut().zip(tables.iter().zip(&self.slots)) {
+            *input = i32::from(self.stretch[usize::from(table[slot])]);
+        }
+        self.inputs[5] = 256;
+        self.set = (((at & 3) << 1 | agrees) << 8 | node) * 6;
+        let dot: i64 = self.weights[self.set..self.set + 6]
+            .iter()
+            .zip(&self.inputs)
+            .map(|(&w, &x)| i64::from(w) * i64::from(x))
+            .sum();
+        self.mixed = squash((dot >> 16) as i32).clamp(1, 4095);
+        self.mixed as u32
+    }
+
+    fn update(&mut self, bit: u32) {
+        let target = bit as i32 * 4095;
+        for (table, &slot) in [
+            &mut self.order1,
+            &mut self.order2,
+            &mut self.guessed,
+            &mut self.order3,
+            &mut self.aligned,
+        ]
+        .into_iter()
+            .zip(&self.slots)
+        {
+            let p = i32::from(table[slot]);
+            table[slot] = (p + ((target - p) >> 4)).clamp(1, 4095) as u16;
+        }
+        let error = ((bit as i32) << 12) - self.mixed;
+        for (w, &x) in self.weights[self.set..self.set + 6].iter_mut().zip(&self.inputs) {
+            *w += (x * error * 6 + 0x8000) >> 16;
+        }
+    }
+}
+
+/// The expected byte while its leading bits equal the bits in `node`.
+fn agreeing(expected: Option<u8>, node: usize, coded: u32) -> Option<u8> {
+    expected.filter(|&byte| usize::from(byte) >> (8 - coded) == node & ((1 << coded) - 1))
 }
 
 /// Distance code: values below 4 are their own slot; above, the slot holds
@@ -529,6 +638,21 @@ impl Encoder {
     fn plain(&mut self, bits: u32, value: u32) {
         for shift in (0..bits).rev() {
             self.code((value >> shift) & 1, 2048);
+        }
+    }
+
+    /// A literal right after a match: the byte the last distance points at
+    /// usually shares its leading bits, so they select the models until the
+    /// first difference (the matched-literal scheme documented for LZMA).
+    fn matched(&mut self, models: &mut [u16], byte: u8, guess: u8) {
+        let (mut offset, mut symbol, mut guess) = (0x100usize, 1usize, usize::from(guess));
+        for shift in (0..8).rev() {
+            guess <<= 1;
+            let guessed = guess & offset;
+            let bit = usize::from(byte >> shift) & 1;
+            self.bit(&mut models[offset + guessed + symbol], bit as u32);
+            symbol = symbol << 1 | bit;
+            offset &= if bit == 1 { guessed } else { !guessed };
         }
     }
 }
@@ -599,6 +723,18 @@ impl<'a> Decoder<'a> {
     fn plain(&mut self, bits: u32) -> u32 {
         (0..bits).fold(0, |value, _| value << 1 | self.code(2048))
     }
+
+    fn matched(&mut self, models: &mut [u16], guess: u8) -> u8 {
+        let (mut offset, mut symbol, mut guess) = (0x100usize, 1usize, usize::from(guess));
+        for _ in 0..8 {
+            guess <<= 1;
+            let guessed = guess & offset;
+            let bit = self.bit(&mut models[offset + guessed + symbol]) as usize;
+            symbol = symbol << 1 | bit;
+            offset &= if bit == 1 { guessed } else { !guessed };
+        }
+        symbol as u8
+    }
 }
 
 /// Chained hash table over four-byte prefixes of the block.
@@ -620,13 +756,15 @@ impl<'a> Matches<'a> {
     }
 
     fn slot(&self, at: usize) -> usize {
-        let key = u32::from_le_bytes(self.bytes[at..at + 4].try_into().expect("four bytes"));
+        let key = u32::from(self.bytes[at])
+            | u32::from(self.bytes[at + 1]) << 8
+            | u32::from(self.bytes[at + 2]) << 16;
         (key.wrapping_mul(0x9e37_79b1) >> (32 - HASH_BITS)) as usize
     }
 
     /// Makes every position below `end` findable.
     fn insert_until(&mut self, end: usize) {
-        while self.inserted < end && self.inserted + 4 <= self.bytes.len() {
+        while self.inserted < end && self.inserted + 3 <= self.bytes.len() {
             let slot = self.slot(self.inserted);
             self.previous[self.inserted] = self.head[slot];
             self.head[slot] = self.inserted as u32;
@@ -643,17 +781,19 @@ impl<'a> Matches<'a> {
     }
 
     /// Longest earlier match for position `at` (length, distance); the
-    /// nearest wins ties. `repeat` is the last distance used.
-    fn best(&mut self, at: usize, repeat: usize) -> (usize, usize) {
+    /// nearest wins ties. `repeats` are the last four distances used.
+    fn best(&mut self, at: usize, repeats: [usize; 4]) -> (usize, usize) {
         self.insert_until(at);
         let mut best = (0usize, 0usize);
-        if repeat != 0 && repeat <= at {
-            let length = self.common(at - repeat, at);
-            if length >= MIN_MATCH {
-                best = (length, repeat);
+        for repeat in repeats {
+            if repeat != 0 && repeat <= at {
+                let length = self.common(at - repeat, at);
+                if length >= MIN_MATCH && length > best.0 {
+                    best = (length, repeat);
+                }
             }
         }
-        if at + 4 > self.bytes.len() {
+        if at + 3 > self.bytes.len() {
             return best;
         }
         let mut candidate = self.head[self.slot(at)];
@@ -665,14 +805,23 @@ impl<'a> Matches<'a> {
             let length = self.common(from, at);
             // A repeat of the last distance is cheaper: keep it unless the
             // new match is clearly longer.
-            let needed = if best.1 == repeat && best.0 > 0 { best.0 + 2 } else { best.0 + 1 };
+            let needed = if best.0 > 0 && repeats.contains(&best.1) {
+                best.0 + 2
+            } else {
+                best.0 + 1
+            };
             if length >= needed.max(MIN_MATCH) {
                 best = (length, at - from);
             }
             candidate = self.previous[from];
         }
         // A short match far away costs more than its literals.
-        if best.0 == MIN_MATCH && best.1 > 1 << 16 && best.1 != repeat {
+        let reach = match best.0 {
+            3 => 1 << 12,
+            4 => 1 << 17,
+            _ => usize::MAX,
+        };
+        if best.1 > reach && !repeats.contains(&best.1) {
             return (0, 0);
         }
         best
@@ -687,31 +836,42 @@ fn match_encode(bytes: &[u8]) -> Vec<u8> {
         out: Vec::with_capacity(bytes.len() / 3 + 16),
     };
     let mut matches = Matches::new(bytes);
-    let (mut at, mut repeat, mut after_match) = (0usize, 0usize, 0usize);
+    let mut literals = Literals::new();
+    let (mut at, mut repeats, mut after_match) = (0usize, [0usize; 4], 0usize);
     while at < bytes.len() {
-        let (mut length, distance) = matches.best(at, repeat);
+        let (mut length, distance) = matches.best(at, repeats);
         if length >= MIN_MATCH && at + 1 < bytes.len() {
             // Lazy step: a longer match one byte later beats this one.
-            let (next, _) = matches.best(at + 1, repeat);
+            let (next, _) = matches.best(at + 1, repeats);
             if next > length {
                 length = 0;
             }
         }
         if length < MIN_MATCH {
-            coder.bit(&mut models.is_match[after_match], 0);
-            let context = if at == 0 { 0 } else { usize::from(bytes[at - 1] >> 4) };
-            coder.tree(
-                &mut models.literal[context * 256..(context + 1) * 256],
-                8,
-                u32::from(bytes[at]),
-            );
+            coder.bit(&mut models.is_match[after_match][at & 3], 0);
+            let back = |k: usize| if at >= k { usize::from(bytes[at - k]) } else { 0 };
+            let before = (back(1), back(2), back(3), at);
+            let expected = (repeats[0] != 0).then(|| bytes[at - repeats[0]]);
+            let mut node = 1usize;
+            for coded in 0..8u32 {
+                let bit = u32::from(bytes[at] >> (7 - coded)) & 1;
+                let p = literals.predict(before, agreeing(expected, node, coded), node);
+                coder.code(bit, p);
+                literals.update(bit);
+                node = node << 1 | bit as usize;
+            }
             after_match = 0;
             at += 1;
             continue;
         }
-        coder.bit(&mut models.is_match[after_match], 1);
-        let repeated = usize::from(distance == repeat);
+        coder.bit(&mut models.is_match[after_match][at & 3], 1);
+        let index = repeats.iter().position(|&repeat| repeat == distance);
+        let repeated = usize::from(index.is_some());
         coder.bit(&mut models.is_repeat, repeated as u32);
+        let index = index.unwrap_or(3);
+        if repeated == 1 {
+            coder.tree(&mut models.repeat_index, 2, index as u32);
+        }
         let value = (length - MIN_MATCH) as u32;
         let choice = &mut models.length_choice[repeated];
         if value < 8 {
@@ -742,7 +902,9 @@ fn match_encode(bytes: &[u8]) -> Vec<u8> {
                 }
             }
         }
-        repeat = distance;
+        // The distance moves to the front of the last four.
+        repeats.copy_within(0..index, 1);
+        repeats[0] = distance;
         after_match = 1;
         at += length;
     }
@@ -753,17 +915,34 @@ fn match_encode(bytes: &[u8]) -> Vec<u8> {
 fn match_decode(payload: &[u8], length: usize) -> Option<Vec<u8>> {
     let mut models = BitModels::new();
     let mut coder = Decoder::new(payload);
+    let mut literals = Literals::new();
     let mut out: Vec<u8> = Vec::with_capacity(length);
-    let (mut repeat, mut after_match) = (0usize, 0usize);
+    let (mut repeats, mut after_match) = ([0usize; 4], 0usize);
     while out.len() < length {
-        if coder.bit(&mut models.is_match[after_match]) == 0 {
-            let context = out.last().map_or(0, |&byte| usize::from(byte >> 4));
-            let byte = coder.tree(&mut models.literal[context * 256..(context + 1) * 256], 8);
-            out.push(byte as u8);
+        if coder.bit(&mut models.is_match[after_match][out.len() & 3]) == 0 {
+            let n = out.len();
+            let back = |k: usize| if n >= k { usize::from(out[n - k]) } else { 0 };
+            let before = (back(1), back(2), back(3), n);
+            let expected = (repeats[0] != 0).then(|| out[n - repeats[0]]);
+            let mut node = 1usize;
+            for coded in 0..8u32 {
+                let p = literals.predict(before, agreeing(expected, node, coded), node);
+                let bit = coder.code(p);
+                literals.update(bit);
+                node = node << 1 | bit as usize;
+            }
+            let byte = node as u8;
+            out.push(byte);
             after_match = 0;
             continue;
         }
         let repeated = coder.bit(&mut models.is_repeat) as usize;
+        let index = if repeated == 1 {
+            coder.tree(&mut models.repeat_index, 2) as usize
+        } else {
+            3
+        };
+        let mut repeat = repeats[index];
         let choice = &mut models.length_choice[repeated];
         let value = if coder.bit(&mut choice[0]) == 0 {
             coder.tree(&mut models.length_low[repeated], 3)
@@ -793,6 +972,8 @@ fn match_decode(payload: &[u8], length: usize) -> Option<Vec<u8>> {
         if repeat == 0 || repeat > out.len() || out.len() + count > length {
             return None;
         }
+        repeats.copy_within(0..index, 1);
+        repeats[0] = repeat;
         for _ in 0..count {
             out.push(out[out.len() - repeat]);
         }
@@ -1124,7 +1305,11 @@ fn pack_block(block: &[u8]) -> Vec<u8> {
         })
         // The match coder, plain and after the call filter.
         .chain([Filter::None, Filter::Calls].into_iter().map(|filter| {
-            (filter, MATCH_CODED, match_encode(&filter.forward(block)))
+            let coded = match_encode(&filter.forward(block));
+            if std::env::var_os("NEXT_TRACE").is_some() {
+                eprintln!("match {:?} {}", filter.code(), coded.len());
+            }
+            (filter, MATCH_CODED, coded)
         }))
         .min_by_key(|(_, _, coded)| coded.len())
         .expect("the filter list is not empty");
