@@ -423,6 +423,10 @@ enum Filter {
     Xor(u32),
     /// Relative x86 call/jump targets made absolute.
     Calls,
+    /// Records of `distance` bytes stored column by column.
+    Columns(u32),
+    /// `Subtract(distance)`, then `Columns(distance)`.
+    ColumnDeltas(u32),
 }
 
 impl Filter {
@@ -432,6 +436,8 @@ impl Filter {
             Self::Subtract(distance) => (1, distance),
             Self::Xor(distance) => (2, distance),
             Self::Calls => (3, 0),
+            Self::Columns(distance) => (4, distance),
+            Self::ColumnDeltas(distance) => (5, distance),
         }
     }
 
@@ -441,6 +447,8 @@ impl Filter {
             (1, 1..) => Some(Self::Subtract(distance)),
             (2, 1..) => Some(Self::Xor(distance)),
             (3, 0) => Some(Self::Calls),
+            (4, 2..) => Some(Self::Columns(distance)),
+            (5, 2..) => Some(Self::ColumnDeltas(distance)),
             _ => None,
         }
     }
@@ -458,10 +466,24 @@ impl Filter {
         bytes[i + 3] = (value >> 16) as u8;
     }
 
+    /// Position in the column order of byte `i` of `len` bytes in records of
+    /// `d`: column by column, each column in record order.
+    fn column_order(len: usize, d: usize) -> impl Iterator<Item = usize> {
+        (0..d).flat_map(move |column| (column..len).step_by(d))
+    }
+
     fn forward(self, block: &[u8]) -> Vec<u8> {
         let mut out = block.to_vec();
         match self {
             Self::None => {}
+            Self::Columns(distance) => {
+                for (slot, from) in out.iter_mut().zip(Self::column_order(block.len(), distance as usize)) {
+                    *slot = block[from];
+                }
+            }
+            Self::ColumnDeltas(distance) => {
+                return Self::Columns(distance).forward(&Self::Subtract(distance).forward(block));
+            }
             Self::Subtract(distance) => {
                 let d = distance as usize;
                 for i in d..block.len() {
@@ -489,6 +511,16 @@ impl Filter {
     fn inverse(self, block: &mut [u8]) {
         match self {
             Self::None => {}
+            Self::Columns(distance) => {
+                let columns = block.to_vec();
+                for (&byte, to) in columns.iter().zip(Self::column_order(block.len(), distance as usize)) {
+                    block[to] = byte;
+                }
+            }
+            Self::ColumnDeltas(distance) => {
+                Self::Columns(distance).inverse(block);
+                Self::Subtract(distance).inverse(block);
+            }
             Self::Subtract(distance) => {
                 let d = distance as usize;
                 for i in d..block.len() {
@@ -546,6 +578,9 @@ fn pack_block(block: &[u8]) -> Vec<u8> {
     ];
     if let Some(distance) = period(block) {
         filters.extend([Filter::Subtract(distance), Filter::Xor(distance)]);
+        if distance >= 2 {
+            filters.extend([Filter::Columns(distance), Filter::ColumnDeltas(distance)]);
+        }
     }
     // Every filter is tried in full; the smallest coded block wins and the
     // first of equals is kept.
@@ -554,6 +589,11 @@ fn pack_block(block: &[u8]) -> Vec<u8> {
         .map(|filter| {
             let (last, primary) = forward_bwt(&filter.forward(block));
             (filter, primary, encode_bytes(&last))
+        })
+        .inspect(|(filter, _, coded)| {
+            if std::env::var_os("NEXT_TRACE").is_some() {
+                eprintln!("{:?} {}", filter.code(), coded.len());
+            }
         })
         .min_by_key(|(_, _, coded)| coded.len())
         .expect("the filter list is not empty");
