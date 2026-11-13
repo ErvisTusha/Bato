@@ -187,7 +187,9 @@ struct Model {
 
 /// Two probabilities per context in one word: a fast one (high half) and a
 /// slow one (low half), both scaled to 16 bits.
-const FRESH: u32 = 0x8000_8000;
+const FRESH: u32 = 0x8000_0000;
+/// Largest observation count a context keeps; its rate settles at 1/LIMIT.
+const LIMIT: u32 = 8;
 
 impl Model {
     fn new() -> Self {
@@ -258,8 +260,11 @@ impl Model {
         let tables = [&self.order0, &self.order1, &self.order2, &self.runs, &self.order3];
         for (i, (table, &slot)) in tables.iter().zip(&self.slots).enumerate() {
             let word = table[slot];
-            self.inputs[2 * i] = i32::from(self.stretch[(word >> 20) as usize]);
-            self.inputs[2 * i + 1] = i32::from(self.stretch[((word & 0xffff) >> 4) as usize]);
+            let p = (word >> 20) as i32;
+            self.inputs[2 * i] = i32::from(self.stretch[p as usize]);
+            // Confidence grows with the observations behind the estimate.
+            let seen = (word & 1023).min(LIMIT) as i32;
+            self.inputs[2 * i + 1] = (p - 2048) * seen.min(32) >> 6;
         }
         self.inputs[INPUTS - 1] = 256;
         self.sets = [partial * INPUTS, (run << 8 | partial) * INPUTS];
@@ -293,7 +298,7 @@ impl Model {
     }
 
     fn update(&mut self, bit: usize) {
-        let target = (bit as u32) * 0xffff;
+        let target = (bit as u32) * 0x3f_ffff;
         let tables = [
             &mut self.order0,
             &mut self.order1,
@@ -303,10 +308,10 @@ impl Model {
         ];
         for (table, &slot) in tables.into_iter().zip(&self.slots) {
             let word = table[slot];
-            let (fast, slow) = (word >> 16, word & 0xffff);
-            let fast = (fast as i32 + ((target as i32 - fast as i32) >> 4)) as u32;
-            let slow = (slow as i32 + ((target as i32 - slow as i32) >> 7)) as u32;
-            table[slot] = fast << 16 | slow;
+            let (p, seen) = ((word >> 10) as i64, word & 1023);
+            // Rate 1 / (seen + 1.5): an average at first, a slow tracker later.
+            let p = p + (((target as i64) - p) * 2 / (2 * i64::from(seen) + 3));
+            table[slot] = (p as u32) << 10 | (seen + 1).min(LIMIT);
         }
         for (weights, (&set, &mixed)) in [&mut self.weights_a, &mut self.weights_b]
             .into_iter()
@@ -404,16 +409,162 @@ fn decode_bytes(payload: &[u8], length: usize) -> Vec<u8> {
     out
 }
 
+// ---------- reversible filters ----------
+
+/// A filter applied to a block before sorting. The packer tries several and
+/// keeps the one that gives the smallest block; the unpacker inverts the one
+/// the block declares.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Filter {
+    None,
+    /// Each byte minus the byte `distance` back.
+    Subtract(u32),
+    /// Each byte exclusive-or the byte `distance` back (bit images).
+    Xor(u32),
+    /// Relative x86 call/jump targets made absolute.
+    Calls,
+}
+
+impl Filter {
+    fn code(self) -> (u8, u32) {
+        match self {
+            Self::None => (0, 0),
+            Self::Subtract(distance) => (1, distance),
+            Self::Xor(distance) => (2, distance),
+            Self::Calls => (3, 0),
+        }
+    }
+
+    fn from_code(kind: u8, distance: u32) -> Option<Self> {
+        match (kind, distance) {
+            (0, 0) => Some(Self::None),
+            (1, 1..) => Some(Self::Subtract(distance)),
+            (2, 1..) => Some(Self::Xor(distance)),
+            (3, 0) => Some(Self::Calls),
+            _ => None,
+        }
+    }
+
+    fn call_site(bytes: &[u8], i: usize) -> bool {
+        bytes[i] & 0xfe == 0xe8 && bytes[i + 4].wrapping_add(1) & 0xfe == 0
+    }
+
+    fn shift_call(bytes: &mut [u8], i: usize, forward: bool) {
+        let value = u32::from(bytes[i + 1]) | u32::from(bytes[i + 2]) << 8 | u32::from(bytes[i + 3]) << 16;
+        let at = i as u32;
+        let value = if forward { value.wrapping_add(at) } else { value.wrapping_sub(at) };
+        bytes[i + 1] = value as u8;
+        bytes[i + 2] = (value >> 8) as u8;
+        bytes[i + 3] = (value >> 16) as u8;
+    }
+
+    fn forward(self, block: &[u8]) -> Vec<u8> {
+        let mut out = block.to_vec();
+        match self {
+            Self::None => {}
+            Self::Subtract(distance) => {
+                let d = distance as usize;
+                for i in d..block.len() {
+                    out[i] = block[i].wrapping_sub(block[i - d]);
+                }
+            }
+            Self::Xor(distance) => {
+                let d = distance as usize;
+                for i in d..block.len() {
+                    out[i] = block[i] ^ block[i - d];
+                }
+            }
+            // Descending, so each test sees the bytes the inverse will see.
+            Self::Calls => {
+                for i in (0..block.len().saturating_sub(4)).rev() {
+                    if Self::call_site(&out, i) {
+                        Self::shift_call(&mut out, i, true);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn inverse(self, block: &mut [u8]) {
+        match self {
+            Self::None => {}
+            Self::Subtract(distance) => {
+                let d = distance as usize;
+                for i in d..block.len() {
+                    block[i] = block[i].wrapping_add(block[i - d]);
+                }
+            }
+            Self::Xor(distance) => {
+                let d = distance as usize;
+                for i in d..block.len() {
+                    block[i] ^= block[i - d];
+                }
+            }
+            Self::Calls => {
+                for i in 0..block.len().saturating_sub(4) {
+                    if Self::call_site(block, i) {
+                        Self::shift_call(block, i, false);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The distance, up to 4096, at which sampled bytes most often equal the
+/// earlier byte: the record length or image row of the block, if it has one.
+fn period(block: &[u8]) -> Option<u32> {
+    const MAX: usize = 4096;
+    if block.len() < 4 * MAX {
+        return None;
+    }
+    let mut equal = vec![0u32; MAX + 1];
+    let step = (block.len() / 4096).max(1);
+    for i in (MAX..block.len()).step_by(step) {
+        let current = block[i];
+        for (distance, count) in equal.iter_mut().enumerate().skip(5) {
+            *count += u32::from(block[i - distance] == current);
+        }
+    }
+    let best = *equal.iter().max()?;
+    // Multiples of the period score alike; the shortest is the period.
+    let distance = equal.iter().position(|&count| count * 16 >= best * 15)?;
+    (best >= 64).then_some(distance as u32)
+}
+
 // ---------- container ----------
 
 fn pack_block(block: &[u8]) -> Vec<u8> {
-    let (last, primary) = forward_bwt(block);
-    let coded = encode_bytes(&last);
-    let mut out = Vec::with_capacity(coded.len() + 17);
+    let mut filters = vec![
+        Filter::None,
+        Filter::Calls,
+        Filter::Subtract(1),
+        Filter::Subtract(2),
+        Filter::Subtract(3),
+        Filter::Subtract(4),
+    ];
+    if let Some(distance) = period(block) {
+        filters.extend([Filter::Subtract(distance), Filter::Xor(distance)]);
+    }
+    // Every filter is tried in full; the smallest coded block wins and the
+    // first of equals is kept.
+    let (filter, primary, coded) = filters
+        .into_iter()
+        .map(|filter| {
+            let (last, primary) = forward_bwt(&filter.forward(block));
+            (filter, primary, encode_bytes(&last))
+        })
+        .min_by_key(|(_, _, coded)| coded.len())
+        .expect("the filter list is not empty");
+    let mut out = Vec::with_capacity(coded.len() + 22);
     out.extend_from_slice(&(block.len() as u32).to_le_bytes());
     out.extend_from_slice(&crc32(block).to_le_bytes());
     if coded.len() < block.len() {
         out.push(1);
+        let (kind, distance) = filter.code();
+        out.push(kind);
+        out.extend_from_slice(&distance.to_le_bytes());
         out.extend_from_slice(&primary.to_le_bytes());
         out.extend_from_slice(&(coded.len() as u32).to_le_bytes());
         out.extend_from_slice(&coded);
@@ -428,9 +579,10 @@ fn word(bytes: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
 }
 
-/// Splits the archive into its blocks: (length, checksum, kind, primary, payload).
+/// Splits the archive into its blocks: (length, checksum, filter and sort
+/// row if sorted, payload).
 #[allow(clippy::type_complexity)]
-fn blocks(archive: &[u8]) -> Option<Vec<(usize, u32, u8, u32, &[u8])>> {
+fn blocks(archive: &[u8]) -> Option<Vec<(usize, u32, Option<(Filter, u32)>, &[u8])>> {
     let mut found = Vec::new();
     let mut at = 4;
     while at < archive.len() {
@@ -441,26 +593,32 @@ fn blocks(archive: &[u8]) -> Option<Vec<(usize, u32, u8, u32, &[u8])>> {
         if length == 0 || length > BLOCK {
             return None;
         }
-        let (primary, size) = match kind {
-            0 => (0, length),
+        let (sorted, size) = match kind {
+            0 => (None, length),
             1 => {
-                let header = (word(archive, at)?, word(archive, at + 4)? as usize);
-                at += 8;
+                let filter = Filter::from_code(*archive.get(at)?, word(archive, at + 1)?)?;
+                let header = (Some((filter, word(archive, at + 5)?)), word(archive, at + 9)? as usize);
+                at += 13;
                 header
             }
             _ => return None,
         };
-        found.push((length, checksum, kind, primary, archive.get(at..at + size)?));
+        found.push((length, checksum, sorted, archive.get(at..at + size)?));
         at += size;
     }
     Some(found)
 }
 
-fn unpack_block((length, checksum, kind, primary, payload): (usize, u32, u8, u32, &[u8])) -> Option<Vec<u8>> {
-    let block = if kind == 0 {
-        payload.to_vec()
-    } else {
-        inverse_bwt(&decode_bytes(payload, length), primary)?
+fn unpack_block(
+    (length, checksum, sorted, payload): (usize, u32, Option<(Filter, u32)>, &[u8]),
+) -> Option<Vec<u8>> {
+    let block = match sorted {
+        None => payload.to_vec(),
+        Some((filter, primary)) => {
+            let mut block = inverse_bwt(&decode_bytes(payload, length), primary)?;
+            filter.inverse(&mut block);
+            block
+        }
     };
     (crc32(&block) == checksum).then_some(block)
 }
