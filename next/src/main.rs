@@ -159,7 +159,10 @@ fn squash(d: i32) -> i32 {
     (SQUASH[i] * (128 - w) + SQUASH[i + 1] * w + 64) >> 7
 }
 
-const INPUTS: usize = 11;
+const INPUTS: usize = 15;
+/// Observation limits per table: quick trackers, then two slow averages of
+/// the order-1 and order-2 contexts for stable regions.
+const LIMITS: [u32; 7] = [LIMIT, LIMIT, LIMIT, LIMIT, LIMIT, 255, 255];
 
 struct Model {
     stretch: Vec<i16>,
@@ -176,7 +179,9 @@ struct Model {
     c2: usize,
     c3: usize,
     run: usize,
-    slots: [usize; 5],
+    slots: [usize; 7],
+    slow1: Vec<u32>,
+    slow2: Vec<u32>,
     inputs: [i32; INPUTS],
     sets: [usize; 2],
     mixed: [i32; 2],
@@ -217,6 +222,8 @@ impl Model {
             order2: vec![FRESH; 1 << 24],
             runs: vec![FRESH; 1 << 19],
             order3: vec![FRESH; 1 << 22],
+            slow1: vec![FRESH; 1 << 16],
+            slow2: vec![FRESH; 1 << 24],
             weights_a: vec![6553; 256 * INPUTS],
             weights_b: vec![6553; 2048 * INPUTS],
             apm_a: apm(1 << 16),
@@ -225,7 +232,7 @@ impl Model {
             c2: 0,
             c3: 0,
             run: 0,
-            slots: [0; 5],
+            slots: [0; 7],
             inputs: [0; INPUTS],
             sets: [0; 2],
             mixed: [0; 2],
@@ -256,14 +263,24 @@ impl Model {
             (self.c2 << 8 | self.c1) << 8 | partial,
             (run << 8 | self.c1) << 8 | partial,
             hash3 << 8 | partial,
+            self.c1 << 8 | partial,
+            (self.c2 << 8 | self.c1) << 8 | partial,
         ];
-        let tables = [&self.order0, &self.order1, &self.order2, &self.runs, &self.order3];
+        let tables = [
+            &self.order0,
+            &self.order1,
+            &self.order2,
+            &self.runs,
+            &self.order3,
+            &self.slow1,
+            &self.slow2,
+        ];
         for (i, (table, &slot)) in tables.iter().zip(&self.slots).enumerate() {
             let word = table[slot];
             let p = (word >> 20) as i32;
             self.inputs[2 * i] = i32::from(self.stretch[p as usize]);
             // Confidence grows with the observations behind the estimate.
-            let seen = (word & 1023).min(LIMIT) as i32;
+            let seen = (word & 1023) as i32;
             self.inputs[2 * i + 1] = (p - 2048) * seen.min(32) >> 6;
         }
         self.inputs[INPUTS - 1] = 256;
@@ -305,13 +322,15 @@ impl Model {
             &mut self.order2,
             &mut self.runs,
             &mut self.order3,
+            &mut self.slow1,
+            &mut self.slow2,
         ];
-        for (table, &slot) in tables.into_iter().zip(&self.slots) {
+        for ((table, &slot), limit) in tables.into_iter().zip(&self.slots).zip(LIMITS) {
             let word = table[slot];
             let (p, seen) = ((word >> 10) as i64, word & 1023);
             // Rate 1 / (seen + 1.5): an average at first, a slow tracker later.
             let p = p + (((target as i64) - p) * 2 / (2 * i64::from(seen) + 3));
-            table[slot] = (p as u32) << 10 | (seen + 1).min(LIMIT);
+            table[slot] = (p as u32) << 10 | (seen + 1).min(limit);
         }
         for (weights, (&set, &mixed)) in [&mut self.weights_a, &mut self.weights_b]
             .into_iter()
@@ -565,6 +584,134 @@ fn period(block: &[u8]) -> Option<u32> {
     (best >= 64).then_some(distance as u32)
 }
 
+// ---------- far repeats ----------
+
+/// Shortest repeat replaced by a reference; shorter ones are left to the
+/// block sort, which handles them better inside one block.
+const MIN_REPEAT: usize = 2048;
+/// Bytes hashed to find a repeat.
+const WINDOW: usize = 32;
+/// Every this many positions enter the table.
+const SAMPLE: usize = 8;
+const TABLE_BITS: u32 = 22;
+
+fn put_number(out: &mut Vec<u8>, mut value: u64) {
+    while value >= 128 {
+        out.push(value as u8 | 128);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+fn take_number(bytes: &[u8], at: &mut usize) -> Option<u64> {
+    let mut value = 0u64;
+    for shift in (0..64).step_by(7) {
+        let byte = *bytes.get(*at)?;
+        *at += 1;
+        value |= u64::from(byte & 127) << shift;
+        if byte < 128 {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// Replaces repeats of at least `MIN_REPEAT` bytes, at any distance in the
+/// whole input, by references. The result is the stream the blocks are cut
+/// from: the input length, the operation list (literal count, repeat
+/// length, distance; a zero repeat length ends it) and the literal bytes.
+fn remove_repeats(input: &[u8]) -> Vec<u8> {
+    const MULTIPLIER: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut table = vec![u32::MAX; 1 << TABLE_BITS];
+    let slot = |hash: u64| (hash >> (64 - TABLE_BITS)) as usize;
+    let mut power = 1u64;
+    for _ in 1..WINDOW {
+        power = power.wrapping_mul(MULTIPLIER);
+    }
+    let (mut ops, mut literals) = (Vec::new(), Vec::new());
+    let mut literal_start = 0usize;
+    let mut hash = 0u64;
+    let mut hashed_from = usize::MAX; // start of the window `hash` covers
+    let mut i = 0usize;
+    while i + WINDOW <= input.len() {
+        if hashed_from != i {
+            hash = input[i..i + WINDOW]
+                .iter()
+                .fold(0u64, |h, &b| h.wrapping_mul(MULTIPLIER).wrapping_add(u64::from(b) + 1));
+            hashed_from = i;
+        }
+        let candidate = table[slot(hash)];
+        if i % SAMPLE == 0 {
+            table[slot(hash)] = i as u32;
+        }
+        let mut length = 0usize;
+        if candidate != u32::MAX {
+            let from = candidate as usize;
+            while i + length < input.len() && input[from + length] == input[i + length] {
+                length += 1;
+            }
+        }
+        if length >= MIN_REPEAT {
+            put_number(&mut ops, (i - literal_start) as u64);
+            put_number(&mut ops, length as u64);
+            put_number(&mut ops, (i - candidate as usize) as u64);
+            literals.extend_from_slice(&input[literal_start..i]);
+            i += length;
+            literal_start = i;
+            continue;
+        }
+        // Slide the window one byte.
+        if i + WINDOW < input.len() {
+            hash = hash
+                .wrapping_sub((u64::from(input[i]) + 1).wrapping_mul(power))
+                .wrapping_mul(MULTIPLIER)
+                .wrapping_add(u64::from(input[i + WINDOW]) + 1);
+            hashed_from = i + 1;
+        }
+        i += 1;
+    }
+    put_number(&mut ops, (input.len() - literal_start) as u64);
+    put_number(&mut ops, 0);
+    literals.extend_from_slice(&input[literal_start..]);
+    let mut stream = Vec::with_capacity(literals.len() + ops.len() + 20);
+    put_number(&mut stream, input.len() as u64);
+    put_number(&mut stream, ops.len() as u64);
+    stream.extend_from_slice(&ops);
+    stream.extend_from_slice(&literals);
+    stream
+}
+
+fn restore_repeats(stream: &[u8]) -> Option<Vec<u8>> {
+    let mut at = 0usize;
+    let total = usize::try_from(take_number(stream, &mut at)?).ok()?;
+    let ops_length = usize::try_from(take_number(stream, &mut at)?).ok()?;
+    let ops = stream.get(at..at.checked_add(ops_length)?)?;
+    let mut literals = stream.get(at + ops_length..)?;
+    if total > literals.len().checked_mul(1 << 20)? + (1 << 20) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(total);
+    let mut op = 0usize;
+    loop {
+        let count = usize::try_from(take_number(ops, &mut op)?).ok()?;
+        let length = usize::try_from(take_number(ops, &mut op)?).ok()?;
+        let (now, rest) = literals.split_at_checked(count)?;
+        out.extend_from_slice(now);
+        literals = rest;
+        if length == 0 {
+            break;
+        }
+        let distance = usize::try_from(take_number(ops, &mut op)?).ok()?;
+        if distance == 0 || distance > out.len() || out.len() + length > total {
+            return None;
+        }
+        for _ in 0..length {
+            out.push(out[out.len() - distance]);
+        }
+    }
+    (out.len() == total && literals.is_empty() && op == ops.len()).then_some(out)
+}
+
 // ---------- container ----------
 
 fn pack_block(block: &[u8]) -> Vec<u8> {
@@ -705,7 +852,8 @@ fn main() {
             std::process::exit(1);
         });
     let output = if args[1] == "c" {
-        let pieces: Vec<&[u8]> = input.chunks(BLOCK).collect();
+        let stream = remove_repeats(&input);
+        let pieces: Vec<&[u8]> = stream.chunks(BLOCK).collect();
         let mut out = MAGIC.to_vec();
         for packed in parallel(&pieces, |piece| pack_block(piece)) {
             out.extend_from_slice(&packed);
@@ -720,11 +868,11 @@ fn main() {
                     .into_iter()
                     .collect::<Option<Vec<_>>>()
             });
-        let Some(parts) = restored else {
+        let Some(output) = restored.and_then(|parts| restore_repeats(&parts.concat())) else {
             eprintln!("corrupt or unsupported archive");
             std::process::exit(1);
         };
-        parts.concat()
+        output
     };
     std::fs::File::create(&args[3])
         .and_then(|mut file| file.write_all(&output))
