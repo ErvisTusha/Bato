@@ -834,4 +834,15 @@ first two take the concurrent path; the rest are run-to-run noise.
   `kennedy.xls` 13,180 (-0.85%), `kodim09.ppm` -0.23%, but the 24-file set
   grows by 356 bytes (one zip +339) and on the 103 development files 27 grow
   against 14 that shrink (total -361 bytes). No clear gain overall.
+* **Declared unused models** (branch `experiment/declared-model`, on format
+  1.20). The encoder tries removing each of six optional models (text,
+  sparse, lag and row experts, record map, bit neighbourhood) and declares
+  it unused when the segment does not grow; the decoder skips it. 24 files:
+  1,178,618 to 1,178,421 bytes (-197; 14 files grow by the one mask byte),
+  unpack 10.3 to 10.2 s (no gain), pack 27.3 to 86.7 s. Removing a model
+  almost always costs at least a byte, so with size first nothing is skipped.
+* **`sao` stored column by column** (28 columns) and packed with 1.20:
+  4,475,938 bytes against 4,023,509 as records (+11.2%); pack 44.0 s against
+  65.4 s, unpack 40.8 s against 55.0 s. The columns lose what the record
+  model learns across fields.
 
