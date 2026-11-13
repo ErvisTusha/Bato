@@ -183,6 +183,17 @@ pub(crate) fn parallel_trials_fit(descriptor: Descriptor) -> bool {
     reserved >= required
 }
 
+/// Whether `models` predictors for inputs of `length` bytes fit in a worker's
+/// reservation at once, each with its history and output.
+fn concurrent_models_fit(descriptor: Descriptor, length: usize, models: usize) -> bool {
+    let Ok(reserved) = memory_required(descriptor, Direction::Encode) else {
+        return false;
+    };
+    let per_model = predictor::memory_required(length + PRIMER.len(), descriptor.table_log2)
+        .saturating_add(3 * length + PRIMER.len() + WORKER_SLACK);
+    reserved >= models.saturating_mul(per_model)
+}
+
 /// Encodes one segment, first applying the reversible x86 address transform
 /// in place when its byte statistics favor it. `raw` is restored before
 /// returning, and chunk CRCs always cover the original bytes.
@@ -269,6 +280,57 @@ pub(crate) fn encode_segment(
         }
     }
     let min_frame = minimum(raw.len());
+    // The x86, filter and plain candidates have the same length and need
+    // nothing from each other, so on a worker whose reservation holds all
+    // their models they run at once. Each is accepted only below the cost so
+    // far and ties go to the earlier one, exactly as when run in turn.
+    let filter = Some(selected_filter).filter(|filter| filters::CANDIDATES.contains(filter));
+    let transforms: Vec<TransformId> = x86
+        .map(x86::Sites::transform)
+        .into_iter()
+        .chain(filter)
+        .chain([TransformId::None])
+        .collect();
+    if trials == Trials::Parallel
+        && transforms.len() > 1
+        && min_frame < winner.0
+        && concurrent_models_fit(descriptor, raw.len(), 2 * transforms.len())
+    {
+        let inputs = transforms
+            .iter()
+            .map(|&transform| filters::forward(raw, transform))
+            .collect::<Result<Vec<_>, _>>()?;
+        let limit = winner.0;
+        let outcomes: Vec<_> = std::thread::scope(|scope| {
+            let runs: Vec<_> = inputs
+                .iter()
+                .map(|input| {
+                    scope.spawn(move || {
+                        model_candidate(
+                            input,
+                            (descriptor, trials, descriptor.segment_bytes()),
+                            limit,
+                            (timing, &mut Snapshot::new(false)),
+                        )
+                    })
+                })
+                .collect();
+            runs.into_iter().map(|run| run.join()).collect()
+        });
+        for (outcome, &transform) in outcomes.into_iter().zip(&transforms) {
+            let outcome = outcome
+                .map_err(|_| BatoError::CorruptStream("model trial thread panicked".into()))?;
+            let Some((cost, primer, mut chunks)) = outcome?.filter(|(cost, ..)| *cost < winner.0)
+            else {
+                continue;
+            };
+            for (chunk, bytes) in chunks.iter_mut().zip(raw.chunks(descriptor.chunk_bytes())) {
+                chunk.crc = crc32c(bytes);
+            }
+            winner = (cost, chunks, Coding { transform, primer });
+        }
+        return Ok((winner.1, winner.2));
+    }
     // Two or more primed candidates of this length follow: train once.
     let mut snapshot = Snapshot::new(
         raw.len() <= SNAPSHOT_BYTES

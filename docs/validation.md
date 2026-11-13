@@ -718,6 +718,18 @@ three runs, default threads: 159 KB executable 3.12 to 2.71 (-13%);
 executable (1.4 MB) 17.2 to 16.8 (-2%). Files with one candidate (text) and
 unpacking are unchanged. One extra model is held in memory meanwhile.
 
+## Same-length candidates at once (2026-11-13)
+
+Format 1.20 unchanged, archives byte-identical. The x86, filter and plain
+candidates of a segment run concurrently when the worker's reservation holds
+all their models; otherwise in turn as before. Wall seconds, default threads,
+pack as the mean of three runs (before / after) and one unpack run:
+159 KB executable pack 2.73 / 1.58 (-42%), unpack 0.91; `hopper.bmp` pack
+1.36 / 1.03 (-24%), unpack 0.84; `sample-3s.wav` 8.43 / 8.16, unpack 3.33;
+`bash` executable (1.4 MB) 16.3 / 17.9, unpack 8.37; `git` executable (4.1 MB)
+45.3 / 43.8, unpack 25.78; `alice29.txt` 1.52 / 1.68, unpack 1.53. Only the
+first two take the concurrent path; the rest are run-to-run noise.
+
 ## Rejected experiments (kept so they are not repeated)
 
 * **Early exit for incompressible chunks** (abort the model attempt after two
