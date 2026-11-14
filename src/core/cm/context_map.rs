@@ -5,10 +5,9 @@
 
 use super::{
     adapt::StateMap,
-    hash, logistic, state,
+    logistic, state,
     table::{Handle, Table},
 };
-use std::sync::OnceLock;
 
 /// Mixer inputs produced per context: adaptive and initial state
 /// probabilities, last-bit confidence and a linear probability term.
@@ -22,63 +21,68 @@ const LINEAR_SHIFT: u32 = 4;
 /// Bits coded per nibble; the table slot changes at each nibble boundary.
 pub(super) const NIBBLE_BITS: usize = 4;
 
+const fn build_fixed_features() -> [[i16; 2]; 256] {
+    let stretch = logistic::stretch_table();
+    let mut features = [[0i16; 2]; 256];
+    let mut index = 0;
+    while index < 256 {
+        let h = state::HISTORIES[index];
+        let total = (h.zeros + h.ones) as i16;
+        let capped = if total < CONFIDENCE_CAP {
+            total
+        } else {
+            CONFIDENCE_CAP
+        };
+        let strength = capped * CONFIDENCE_STEP;
+        let last = match h.last {
+            0 => strength,
+            1 => -strength,
+            _ => 0,
+        };
+        features[index] = [
+            stretch[state::initial_probability(index as u8) as usize],
+            last,
+        ];
+        index += 1;
+    }
+    features
+}
+
 // These two mixer inputs depend only on a 256-state history, not on the
-// current data. Compute them once instead of redoing logit conversion for
-// every context on every encoded or decoded bit.
-static FIXED_FEATURES: OnceLock<[[i16; 2]; 256]> = OnceLock::new();
+// current data. Compute them at compile time instead of redoing logit
+// conversion for every context on every encoded or decoded bit.
+static FIXED_FEATURES: [[i16; 2]; 256] = build_fixed_features();
 
 #[derive(Clone)]
+#[repr(C)]
 pub(super) struct ContextMap {
-    maps: [StateMap; 8],
-    fixed_features: &'static [[i16; 2]; 256],
     handle: Handle,
-    node: usize,
     state: u8,
-    depth: usize,
+    maps: [StateMap; 8],
 }
 impl ContextMap {
-    pub(super) fn new() -> Self {
+    pub(super) const fn new() -> Self {
         Self {
-            maps: std::array::from_fn(|_| StateMap::new()),
-            fixed_features: FIXED_FEATURES.get_or_init(|| {
-                std::array::from_fn(|index| {
-                    let h = state::HISTORIES[index];
-                    let strength =
-                        i16::from(h.zeros + h.ones).min(CONFIDENCE_CAP) * CONFIDENCE_STEP;
-                    let last = match h.last {
-                        0 => strength,
-                        1 => -strength,
-                        _ => 0,
-                    };
-                    [
-                        logistic::stretch(state::initial_probability(index as u8)),
-                        last,
-                    ]
-                })
-            }),
-            handle: Handle::default(),
-            node: 0,
+            handle: Handle::EMPTY,
             state: 0,
-            depth: 0,
+            maps: [StateMap::new(); 8],
         }
     }
     #[inline]
     pub(super) fn predict(
         &mut self,
         table: &mut Table,
-        base: u64,
-        prefix: u16,
+        mixed_key: u64,
         bit_depth: usize,
+        node: usize,
     ) -> [i16; FEATURES] {
-        self.depth = bit_depth;
-        let depth = bit_depth % NIBBLE_BITS;
-        if depth == 0 {
-            self.handle = table.find(hash::mix(base ^ (u64::from(prefix) << 32)));
+        if node == 0 {
+            (self.handle, self.state) = table.find(mixed_key);
+        } else {
+            self.state = table.history(self.handle, node);
         }
-        self.node = ((1usize << depth) | (usize::from(prefix) & ((1 << depth) - 1))) - 1;
-        self.state = table.history(self.handle, self.node);
-        let probability = self.maps[self.depth].probability(self.state);
-        let [initial, last] = self.fixed_features[usize::from(self.state)];
+        let probability = self.maps[bit_depth].probability(self.state);
+        let [initial, last] = FIXED_FEATURES[usize::from(self.state)];
         [
             logistic::stretch(probability),
             initial,
@@ -95,8 +99,8 @@ impl ContextMap {
         self.state
     }
     #[inline]
-    pub(super) fn observe(&mut self, table: &mut Table, bit: u8) {
-        self.maps[self.depth].observe(self.state, bit);
-        table.observe(self.handle, self.node, bit);
+    pub(super) fn observe(&mut self, table: &mut Table, bit_depth: usize, node: usize, bit: u8) {
+        self.maps[bit_depth].observe(self.state, bit);
+        table.observe(self.handle, node, bit);
     }
 }

@@ -72,7 +72,13 @@ impl Stride {
             vote.count /= 2;
         }
         let usable = |lag: usize| lag >= MIN_LAG && history.len() >= lag + SCORE_WINDOW;
-        let mut candidates: Vec<usize> = self.lag.into_iter().collect();
+        const MAX_CANDIDATES: usize = 1 + TOP_VOTES * DIVISORS.len();
+        let mut candidates = [0usize; MAX_CANDIDATES];
+        let mut count = 0usize;
+        if let Some(lag) = self.lag {
+            candidates[count] = lag;
+            count += 1;
+        }
         for vote in voted
             .iter()
             .take(TOP_VOTES)
@@ -80,15 +86,25 @@ impl Stride {
         {
             for divisor in DIVISORS {
                 if vote.lag % divisor == 0 {
-                    candidates.push(vote.lag / divisor);
+                    candidates[count] = vote.lag / divisor;
+                    count += 1;
                 }
             }
         }
-        candidates.sort_unstable();
-        candidates.dedup();
+        candidates[..count].sort_unstable();
+        let mut unique = 0usize;
+        for i in 0..count {
+            if unique == 0 || candidates[i] != candidates[unique - 1] {
+                candidates[unique] = candidates[i];
+                unique += 1;
+            }
+        }
         // Highest score wins; a smaller lag wins a near tie.
         let mut best: Option<(usize, usize)> = None;
-        for lag in candidates.into_iter().filter(|&lag| usable(lag)) {
+        for &lag in &candidates[..unique] {
+            if !usable(lag) {
+                continue;
+            }
             let score = Self::alike(history, lag);
             if best.is_none_or(|(_, s)| score > s + s / TIE_DIVISOR) {
                 best = Some((lag, score));

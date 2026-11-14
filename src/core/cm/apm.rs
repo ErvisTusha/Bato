@@ -15,6 +15,13 @@ const BIN_WIDTH: u16 = 1 << BIN_SHIFT;
 const INITIAL_COUNT: u16 = 16;
 /// Count limit: the bins' adaptation rate settles near 1/512.
 const LIMIT: u16 = 512;
+/// Selects which 64-byte cache half of a 33-bin APM row to prefetch.
+#[derive(Clone, Copy)]
+#[repr(usize)]
+pub(super) enum BinHalf {
+    Low = 0,
+    High = 64,
+}
 #[derive(Clone)]
 pub(super) struct Apm {
     cells: Vec<Cell>,
@@ -53,14 +60,21 @@ impl Apm {
             fraction: 0,
         })
     }
-    /// Starts loading the bins of `context` into the cache; the row is known
-    /// well before the probability that picks the bin within it.
+    /// Starts loading the predicted cache half of `context` into L1; the row
+    /// is known well before the probability that picks the bin within it.
     #[inline]
-    // Without x86-64 prefetch the context is legitimately unused.
+    // Without x86-64 prefetch the arguments are legitimately unused.
     #[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
-    pub(super) fn prefetch(&self, context: usize) {
+    pub(super) fn prefetch(&self, context: usize, half: BinHalf) {
+        // Large tables (65,536 rows) overflow L3 cache. Issue one prefetch
+        // on the predicted bin half per large stage (skipping L1/L2-sized
+        // stages <= 1,024 rows) so we do not saturate hardware Line Fill
+        // Buffers and drop the 256 MiB context-table prefetches.
+        if self.mask <= 1023 {
+            return;
+        }
         // SAFETY: the masked context names a row of BINS allocated cells, and
-        // every offset below stays inside that row (BINS * 4 = 132 bytes);
+        // offset 0 or 64 stays inside that row (BINS * 4 = 132 bytes);
         // prefetch neither reads values into the model nor writes memory.
         #[cfg(target_arch = "x86_64")]
         unsafe {
@@ -69,11 +83,7 @@ impl Apm {
                 .as_ptr()
                 .add((context & self.mask) * BINS)
                 .cast::<i8>();
-            // Each row occupies 132 bytes, or three 64-byte cache lines.
-            // The former offset 131 shared the line already prefetched at 128.
-            for offset in [0, 64, 128] {
-                std::arch::x86_64::_mm_prefetch(row.add(offset), std::arch::x86_64::_MM_HINT_T0);
-            }
+            std::arch::x86_64::_mm_prefetch(row.add(half as usize), std::arch::x86_64::_MM_HINT_T0);
         }
     }
     #[inline]
@@ -90,8 +100,9 @@ impl Apm {
         let a = u32::from(left.probability());
         let b = u32::from(right.probability());
         let weighted = a * u32::from(BIN_WIDTH - self.fraction) + b * u32::from(self.fraction);
-        ((weighted + u32::from(BIN_WIDTH / 2)) >> BIN_SHIFT).clamp(1, u32::from(logistic::MAX))
-            as u16
+        let calibrated = ((weighted + u32::from(BIN_WIDTH / 2)) >> BIN_SHIFT) as u16;
+        debug_assert!((1..=logistic::MAX).contains(&calibrated));
+        calibrated
     }
     #[inline]
     pub(super) fn observe(&mut self, bit: u8) {

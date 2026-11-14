@@ -52,7 +52,7 @@ const fn squash_table() -> [u16; 8193] {
 
 static SQUASH: [u16; 8193] = squash_table();
 
-const fn stretch_table() -> [i16; 65536] {
+pub(super) const fn stretch_table() -> [i16; 65536] {
     let squash = squash_table();
     let mut table = [0i16; 65536];
     let mut probability = 32768usize;

@@ -36,28 +36,39 @@ static RATES: [u32; COUNT_MAX as usize + 1] = reciprocals();
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Cell(u32);
 impl Cell {
-    pub(super) fn new(probability: u16, count: u16) -> Self {
-        Self((u32::from(probability) << 16) | u32::from(count).min(COUNT_MAX))
+    pub(super) const fn new(probability: u16, count: u16) -> Self {
+        const _: () = assert!(logistic::MAX == u16::MAX);
+        let clamped = if probability == 0 { 1 } else { probability };
+        let capped = if (count as u32) < COUNT_MAX {
+            count as u32
+        } else {
+            COUNT_MAX
+        };
+        Self(((clamped as u32) << 16) | capped)
     }
     #[inline]
     pub(super) fn probability(self) -> u16 {
-        ((self.0 >> 16) as u16).clamp(1, logistic::MAX)
+        let probability = (self.0 >> 16) as u16;
+        debug_assert!((1..=logistic::MAX).contains(&probability));
+        probability
     }
     #[inline]
     pub(super) fn train(&mut self, bit: u8, limit: u16) {
         // Equal to `train_weighted` with `FULL_WEIGHT`: multiplying by 2^8
         // before the 2^24 shift is a shift by 2^16.
         const _: () = assert!(FULL_WEIGHT == 1 << 8);
+        debug_assert!(u32::from(limit) <= COUNT_MAX);
         let count = self.0 & COUNT_MAX;
         let probability = i64::from(self.0 >> COUNT_BITS);
         let target = if bit == 0 { Q } else { 0 };
         let delta = ((target - probability) * i64::from(RATES[count as usize])) >> 16;
         let next = (probability + delta).clamp(64, Q - 63) as u32;
-        self.0 = (next << COUNT_BITS) | (count + 1).min(u32::from(limit).min(COUNT_MAX));
+        self.0 = (next << COUNT_BITS) | (count + 1).min(u32::from(limit));
     }
     #[inline]
     pub(super) fn train_weighted(&mut self, bit: u8, limit: u16, weight: u16) {
         debug_assert!(weight <= FULL_WEIGHT);
+        debug_assert!(u32::from(limit) <= COUNT_MAX);
         if weight == 0 {
             return;
         }
@@ -67,20 +78,29 @@ impl Cell {
         let delta =
             ((target - probability) * i64::from(RATES[count as usize]) * i64::from(weight)) >> 24;
         let next = (probability + delta).clamp(64, Q - 63) as u32;
-        self.0 = (next << COUNT_BITS) | (count + 1).min(u32::from(limit).min(COUNT_MAX));
+        self.0 = (next << COUNT_BITS) | (count + 1).min(u32::from(limit));
     }
 }
-#[derive(Clone)]
+const fn initial_cells() -> [Cell; 256] {
+    let mut cells = [Cell::new(logistic::HALF, 0); 256];
+    let mut i = 0;
+    while i < 256 {
+        cells[i] = Cell::new(state::initial_probability(i as u8), 0);
+        i += 1;
+    }
+    cells
+}
+const INITIAL_CELLS: [Cell; 256] = initial_cells();
+
+#[derive(Clone, Copy)]
 pub(super) struct StateMap {
     cells: [Cell; 256],
 }
 impl StateMap {
-    pub(super) fn new() -> Self {
-        let mut cells = [Cell::new(logistic::HALF, 0); 256];
-        for (i, cell) in cells.iter_mut().enumerate() {
-            *cell = Cell::new(state::initial_probability(i as u8), 0);
+    pub(super) const fn new() -> Self {
+        Self {
+            cells: INITIAL_CELLS,
         }
-        Self { cells }
     }
     #[inline]
     pub(super) fn probability(&self, state: u8) -> u16 {

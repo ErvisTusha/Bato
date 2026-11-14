@@ -45,6 +45,7 @@ pub(in crate::core::cm) struct Neighbors {
     /// The two bytes before the current one.
     left: u16,
     enabled: bool,
+    selected_prefix: u16,
     selected: Option<[usize; FEATURES]>,
 }
 
@@ -66,12 +67,14 @@ impl Neighbors {
             rows: [0; 3],
             left: 0,
             enabled: false,
+            selected_prefix: 0,
             selected: None,
         })
     }
 
     pub(in crate::core::cm) fn begin_byte(&mut self, history: &[u8], period: Option<usize>) {
         self.enabled = false;
+        self.selected_prefix = 0;
         self.selected = None;
         let Some(stride) = period.filter(|&s| s >= 2 && s <= history.len() / 2) else {
             return;
@@ -93,10 +96,7 @@ impl Neighbors {
     }
 
     #[inline]
-    pub(in crate::core::cm) fn feature(&mut self, prefix: u16) -> [i16; FEATURES] {
-        if !self.enabled {
-            return [0; FEATURES];
-        }
+    fn indices(&self, prefix: u16) -> [usize; FEATURES] {
         debug_assert!((1..256).contains(&prefix));
         let depth = coded_bits(prefix);
         let partial = u32::from(prefix ^ (1 << depth));
@@ -118,7 +118,45 @@ impl Neighbors {
                 | (pixels(third, depth, 2) as u64) << 28,
         ) as usize
             & (LARGE_CELLS - 1);
-        self.selected = Some([small, wide, tall, large]);
+        [small, wide, tall, large]
+    }
+
+    #[inline]
+    // Without x86-64 prefetch the prefix may still update `selected`, and on
+    // non-x86_64 architectures prefetch itself is a no-op.
+    pub(in crate::core::cm) fn prefetch(&mut self, prefix: u16) {
+        if !self.enabled {
+            return;
+        }
+        let indices @ [_, wide, tall, large] = self.indices(prefix);
+        self.selected = Some(indices);
+        self.selected_prefix = prefix;
+        #[cfg(target_arch = "x86_64")]
+        // SAFETY: `indices()` masks `wide` and `tall` below `TEMPLATE_CELLS`
+        // and `large` below `LARGE_CELLS`; prefetch neither reads values into
+        // the model nor writes memory.
+        unsafe {
+            use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+            _mm_prefetch(self.wide.as_ptr().add(wide).cast(), _MM_HINT_T0);
+            _mm_prefetch(self.tall.as_ptr().add(tall).cast(), _MM_HINT_T0);
+            _mm_prefetch(self.large.as_ptr().add(large).cast(), _MM_HINT_T0);
+        }
+    }
+
+    #[inline]
+    pub(in crate::core::cm) fn feature(&mut self, prefix: u16) -> [i16; FEATURES] {
+        if !self.enabled {
+            return [0; FEATURES];
+        }
+        let [small, wide, tall, large] = match self.selected {
+            Some(indices) if self.selected_prefix == prefix => indices,
+            _ => {
+                let indices = self.indices(prefix);
+                self.selected = Some(indices);
+                self.selected_prefix = prefix;
+                indices
+            }
+        };
         [
             logistic::stretch(self.cells[small].probability()),
             logistic::stretch(self.wide[wide].probability()),
@@ -129,7 +167,8 @@ impl Neighbors {
 
     #[inline]
     pub(in crate::core::cm) fn observe(&mut self, bit: u8) {
-        if let Some([small, wide, tall, large]) = self.selected {
+        if let Some([small, wide, tall, large]) = self.selected.take() {
+            self.selected_prefix = 0;
             self.cells[small].train(bit, LIMIT);
             self.wide[wide].train(bit, LIMIT);
             self.tall[tall].train(bit, LIMIT);

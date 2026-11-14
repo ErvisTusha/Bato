@@ -49,12 +49,11 @@ const BLOCK_SAMPLES: usize = 256;
 /// by `MAX_ROW - lag`. Walking the earlier bytes of each sample contiguously
 /// and summing in 16-bit lanes lets the compiler vectorise the sums sixteen
 /// bytes at a time; the totals equal `difference`'s.
-fn row_differences(history: &[u8]) -> (Vec<u32>, Vec<u16>) {
+#[inline(always)]
+fn row_differences_inner(history: &[u8]) -> Vec<u32> {
     let end = history.len();
     let mut sums = vec![0u32; MAX_ROW - MIN_ROW + 1];
     let mut block = vec![0u16; MAX_ROW - MIN_ROW + 1];
-    // Samples equal to the byte one distance back; at most `SAMPLES`.
-    let mut equal = vec![0u16; MAX_ROW - MIN_ROW + 1];
     for first in (0..SAMPLES).step_by(BLOCK_SAMPLES) {
         block.fill(0);
         for k in first..(first + BLOCK_SAMPLES).min(SAMPLES) {
@@ -65,15 +64,61 @@ fn row_differences(history: &[u8]) -> (Vec<u32>, Vec<u16>) {
             for (sum, &byte) in block.iter_mut().zip(earlier) {
                 *sum += u16::from(current.abs_diff(byte));
             }
-            for (count, &byte) in equal.iter_mut().zip(earlier) {
-                *count += u16::from(current == byte);
-            }
         }
         for (sum, &part) in sums.iter_mut().zip(&block) {
             *sum += u32::from(part);
         }
     }
-    (sums, equal)
+    sums
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn row_differences_avx2(history: &[u8]) -> Vec<u32> {
+    row_differences_inner(history)
+}
+
+fn row_differences(history: &[u8]) -> Vec<u32> {
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("avx2") {
+        // SAFETY: `is_x86_feature_detected!("avx2")` guarantees AVX2 support;
+        // `row_differences_avx2` runs pure safe Rust compiled with AVX2.
+        return unsafe { row_differences_avx2(history) };
+    }
+    row_differences_inner(history)
+}
+
+/// Counts of samples equal to the byte `lag` back, computed only when
+/// `row_differences` does not yield a row period.
+#[inline(always)]
+fn row_equals_inner(history: &[u8]) -> Vec<u16> {
+    let end = history.len();
+    let mut equal = vec![0u16; MAX_ROW - MIN_ROW + 1];
+    for k in 0..SAMPLES {
+        let i = end - 1 - k * SAMPLE_STEP;
+        let current = history[i];
+        let earlier = &history[i - MAX_ROW..=i - MIN_ROW];
+        for (count, &byte) in equal.iter_mut().zip(earlier) {
+            *count += u16::from(current == byte);
+        }
+    }
+    equal
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn row_equals_avx2(history: &[u8]) -> Vec<u16> {
+    row_equals_inner(history)
+}
+
+fn row_equals(history: &[u8]) -> Vec<u16> {
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("avx2") {
+        // SAFETY: `is_x86_feature_detected!("avx2")` guarantees AVX2 support;
+        // `row_equals_avx2` runs pure safe Rust compiled with AVX2.
+        return unsafe { row_equals_avx2(history) };
+    }
+    row_equals_inner(history)
 }
 
 /// Fewest equal samples (of `SAMPLES`) for a record period.
@@ -127,7 +172,7 @@ impl Rows {
             .map(|lag| (difference(history, lag), lag))
             .min()
             .map_or(1, |(_, lag)| lag);
-        let (sums, equal) = row_differences(history);
+        let sums = row_differences(history);
         let mut scores: Vec<(usize, usize)> = (MIN_ROW..=MAX_ROW)
             .filter(|lag| lag % self.unit == 0)
             .map(|lag| (sums[MAX_ROW - lag] as usize, lag))
@@ -139,6 +184,7 @@ impl Rows {
             .filter(|&(score, _)| score * 16 <= median * MAX_RELATIVE_SIXTEENTHS)
             .map(|(_, lag)| lag);
         if self.row.is_none() {
+            let equal = row_equals(history);
             self.row = record_period(&equal);
             self.unit = self.row.map_or(self.unit, |_| 1);
         }

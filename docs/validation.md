@@ -866,3 +866,71 @@ first two take the concurrent path; the rest are run-to-run noise.
   use, folders of mixed files, it loses to xz on size, pack time and unpack
   time, and to 1.20 on size.
 
+## Four-way match index and CM engine speedups, format 1.21 (2026-11-13)
+
+Format 1.21 keeps the exact byte-identical speedups measured against commit
+`1c1b1bf` (format 1.20) alongside a 4-way associative match index within the
+existing `Matcher` table allocation (`src/core/cm/models/matcher.rs`):
+
+- Resolved `Dispatch::Avx2` once in `Predictor::new`, added 16-wide AVX2
+  training and in-register widening reduction in `src/core/cm/simd.rs`, and
+  skipped tail loops when `count` is a multiple of 16.
+- Returned the initial state directly from `Table::find`, hoisted nibble-tree
+  `(depth, node)` computation and second-nibble DRAM prefetches (during bit-3
+  `observe`) out of `ContextMap`, targeted APM center cache-line prefetches to
+  65,536-row tables only, compiled `StateMap` initial cells via `const fn`,
+  shared `Arc<(usize, Predictor)>` primer snapshots across same-length
+  candidates, and skipped `row_equals` unless `row_differences` finds no row.
+- Replaced the direct-mapped `Matcher` slot with a 4-way associative bucket
+  checked via a 6-byte prefix slice compare and backward length comparison.
+
+Measured on the 11 Canterbury development files (2,810,784 raw bytes, single
+runs on default settings, all restored and byte-verified) against commit
+`1c1b1bf`: total size 336,324 to 336,254 bytes (-70 bytes; `alice29.txt` -30,
+`plrabn12.txt` -23, `lcet10.txt` -8, `asyoulik.txt` -7, `kennedy.xls` -3,
+`grammar.lsp` -1, `ptt5` -1; regressions `cp.html` +2, `sum` +1; ties
+`fields.c` 0, `xargs.1` 0); total pack time 48.596 s to 37.191 s (-23.5%),
+total unpack time 39.546 s to 31.075 s (-21.4%). Note: format 1.20 with only
+the byte-identical speedups measured 336,324 bytes, 38.235 s pack, 31.792 s
+unpack.
+
+## Match-APM context de-aliasing and hot-path speedups, format 1.22 (2026-11-14)
+
+Format 1.22 builds on format 1.21 with compact state/table representations,
+targeted AVX2 dispatch across the CM prediction/update loop, sparse expert-mixer
+padding skipping, and de-aliased match-APM contexts:
+
+- Compacted `Handle` (`src/core/cm/table.rs`) and `ContextMap` (`#[repr(C)]`,
+  compile-time `FIXED_FEATURES`), compiled `stretch_table` (`logistic.rs`) and
+  `StateMap` (`adapt.rs`) via `const fn`, and shared `Snapshot` setup across
+  primer runs (`segment.rs`).
+- Enforced `1..=65535` probability bounds inside `Cell::new` so `Cell::probability`
+  and `Apm::predict` drop hot-path clamps, narrowed `Isse` (`isse.rs`) arithmetic
+  to `i32`, removed `Vec` allocation in `Stride::evaluate` (`models/stride.rs`),
+  added `Neighbors::prefetch` (`models/neighbors.rs`) and `BinHalf` calibration
+  half-line prefetches (`apm.rs`, skipped for `mask <= 1023`), skipped zero
+  padding lanes in expert mixers via `LaneShape`/`Mixer::with_sparse_bias`
+  (`mixer.rs`), and added AVX2 target-feature wrappers (`probability_avx2`,
+  `observe_avx2` in `predictor.rs`; `row_differences_avx2`, `row_equals_avx2`
+  in `models/rows.rs`).
+- Expanded `APM_CONTEXTS[1]` from 256 to 1024 entries (`src/core/cm/predictor.rs`)
+  with non-colliding index `(matcher.state * 8 + depth) | (match_bit << 7) |
+  (match_class << 8)` (replacing the XOR formula that collided `matcher.state`
+  bits 3..4 with `match_class`).
+
+Measured on the 11 Canterbury development files (2,810,784 raw bytes, single
+runs on default settings, all restored and byte-verified):
+
+- Against format 1.21 post-Step-4 (`336,254` bytes, `35.521 s` pack, `28.238 s`
+  unpack): total size `336,254` to `335,885` bytes (`-369` bytes; all 11 files
+  smaller: `lcet10.txt` -142, `plrabn12.txt` -94, `alice29.txt` -62,
+  `asyoulik.txt` -34, `kennedy.xls` -15, `ptt5` -6, `sum` -6, `fields.c` -5,
+  `cp.html` -2, `xargs.1` -2, `grammar.lsp` -1); total pack time `35.521 s` to
+  `33.988 s` (`-4.3%`), total unpack time `28.238 s` to `27.399 s` (`-3.0%`).
+- Against commit `1c1b1bf` (`336,324` bytes, `48.596 s` pack, `39.546 s` unpack):
+  total size `-439` bytes (`lcet10.txt` -150, `plrabn12.txt` -117, `alice29.txt`
+  -92, `asyoulik.txt` -41, `kennedy.xls` -18, `ptt5` -7, `fields.c` -5, `sum`
+  -5, `grammar.lsp` -2, `xargs.1` -2; `cp.html` tie; 0 regressions), total pack
+  time `-30.1%`, total unpack time `-30.7%`.
+
+

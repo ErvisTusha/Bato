@@ -1,7 +1,7 @@
-# Bato format 1.20
+# Bato format 1.22
 
 A `.bato` stream holds file bytes or a serialized directory tree. Bato 0.8
-accepts format 1.20 as its underlying compression stream.
+accepts format 1.22 as its underlying compression stream.
 
 The stream is a 10-byte header, zero or more blocks, and a footer. Fixed-width
 integers are little-endian. Variable integers are canonical unsigned LEB128:
@@ -14,7 +14,7 @@ follows; redundant leading zero groups and values exceeding u64 are rejected.
 |---|---|---|
 | 0 | 4 | `BATO` |
 | 4 | 1 | Major `1` |
-| 5 | 1 | Minor `20` (the version of this document; other values are rejected) |
+| 5 | 1 | Minor `22` (the version of this document; other values are rejected) |
 | 6 | 1 | Flags: bit 0 directory archive; other bits zero |
 | 7 | 1 | Segment log2, 16..30 (default 26) |
 | 8 | 1 | CM chunk log2, 12..20, no greater than segment log2 (default 18) |
@@ -108,11 +108,11 @@ The decoder builds one lookup table; it does no adaptive training.
 The payload is a binary arithmetic code: 32-bit interval, 16-bit probabilities, byte renormalization and the shortest zero-padded final code point. The decoder checks the canonical prefix and the exact tail. Bit probabilities come from the context-mixing model in `src/core/cm`, which is the normative definition for this version:
 
 * hashed order 0–4 and 6 contexts and four word/line contexts, each a nibble bit-history map in a shared cache-line table of `min(4 * (primer + segment length), 2^cap)` buckets rounded up to a power of two, 64 bytes each;
-* an order-0 map, a byte-run model, a match model, a record-stride model and a bit-neighbourhood model;
+* an order-0 map, a byte-run model, a four-way associative match model, a record-stride model and a bit-neighbourhood model;
 * four auxiliary experts with their own mixers, the first two being: text (orders 5 and 7, word + previous byte, three words) and sparse structure (bytes 2, 3, 4 back and the 2/3 pair);
 * a lag expert (`src/core/cm/models/stride.rs`, normative): long match distances vote for a lag between 64 B and 2 MiB at which the data repeats approximately (a video frame, an image plane, fixed-size records); every 4,096 bytes the lag with the best score over the last 2,048 bytes, among the most voted distances and their divisors, is chosen, and four contexts built from the bytes one lag back and their left neighbours feed a third auxiliary expert (constant when no lag is known);
 * a row expert (`src/core/cm/models/rows.rs`, normative): every 32,768 bytes, once 16,384 + 31,232 bytes of history exist, the distance in 16..16,384 bytes whose sampled mean difference is lowest, if under 9/16 of the median over all distances, is taken as the row distance, and the distance in 1..4 with the lowest difference as the sample unit; eight contexts built from the left, upper, upper-left and upper-right neighbours, quantised neighbour differences and the previous sample's vertical difference feed a fourth auxiliary expert (constant when no row is known);
-* three first-layer mixers, two final mixers whose outputs are averaged (selected by the previous byte's high bits and by the match model's state), three state-conditioned calibrators and eight chained APMs (partial byte; match state; two and three previous bytes; order 4; current word; word pair; expected match byte), each blending 1:1 with the previous stage's output.
+* three first-layer mixers, two final mixers whose outputs are averaged (selected by the previous byte's high bits and by the match model's state), three state-conditioned calibrators and eight chained APMs (partial byte; match state with predicted bit and high byte class; two and three previous bytes; order 4; current word; word pair; expected match byte), each blending 1:1 with the previous stage's output.
 
 All arithmetic is integer, so every platform produces identical bytes.
 
@@ -305,7 +305,7 @@ part of the decoding contract. All choices compare complete serialized bytes.
 ## Archive envelopes and split volumes
 
 Directory archives can be wrapped in separately versioned envelopes. Plain
-`BATO` streams use format 1.20. All wrapper
+`BATO` streams use format 1.22. All wrapper
 integers are unsigned and little-endian.
 
 - `BAE1` is followed by one binary [age v1](https://c2sp.org/age) passphrase
@@ -333,7 +333,7 @@ Encryption randomness is independent of Bato's deterministic compressor.
 
 ## Checkpoints and recovery
 
-Bato 0.8 keeps the normal `BATO` 1.20 stream. A local `BAJ2` checkpoint
+Bato 0.8 keeps the normal `BATO` 1.22 stream. A local `BAJ2` checkpoint
 records complete segment boundaries, accumulated CRC32C, and SHA-256
 identities for the source and staged output. Private checkpoint records use
 independent age X25519 payloads. The job identity is stored in an age

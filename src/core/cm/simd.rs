@@ -9,18 +9,45 @@ pub(super) enum Dispatch {
     /// Use the fastest kernels the CPU supports.
     #[default]
     Native,
-    /// Use only the portable scalar reference kernels (tests compare the
-    /// vector kernels against them).
-    #[cfg(test)]
+    /// Resolved AVX2 kernel dispatch.
+    #[cfg(target_arch = "x86_64")]
+    Avx2,
+    /// Use only the portable scalar reference kernels.
     Scalar,
 }
 impl Dispatch {
+    /// Resolves `Native` once to the best kernel supported on this CPU.
+    #[inline]
+    pub(super) fn resolve(self) -> Self {
+        match self {
+            Self::Native => {
+                #[cfg(target_arch = "x86_64")]
+                if std::is_x86_feature_detected!("avx2") {
+                    return Self::Avx2;
+                }
+                Self::Scalar
+            }
+            other => other,
+        }
+    }
+    /// Whether AVX2 kernels were resolved for this instance.
+    #[inline]
+    pub(super) fn is_resolved_avx2(self) -> bool {
+        #[cfg(target_arch = "x86_64")]
+        {
+            matches!(self, Self::Avx2)
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            false
+        }
+    }
     /// Whether AVX2 kernels may run.
     #[inline]
     pub(super) fn avx2(self) -> bool {
         #[cfg(target_arch = "x86_64")]
         {
-            self == Self::Native && std::is_x86_feature_detected!("avx2")
+            self == Self::Avx2 || (self == Self::Native && std::is_x86_feature_detected!("avx2"))
         }
         #[cfg(not(target_arch = "x86_64"))]
         {
@@ -76,6 +103,7 @@ pub(super) fn dot_active(
 }
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+#[inline]
 unsafe fn avx2(inputs: &[i16; INPUTS], weights: &[i16; INPUTS], count: usize) -> i64 {
     use std::arch::x86_64::*;
     let mut sum = _mm256_setzero_si256();
@@ -86,14 +114,27 @@ unsafe fn avx2(inputs: &[i16; INPUTS], weights: &[i16; INPUTS], count: usize) ->
         sum = _mm256_add_epi32(sum, _mm256_madd_epi16(a, b));
         at += 16;
     }
-    let mut lanes = [0i32; 8];
-    _mm256_storeu_si256(lanes.as_mut_ptr().cast(), sum);
-    lanes.into_iter().map(i64::from).sum::<i64>()
-        + inputs[at..count]
-            .iter()
-            .zip(&weights[at..count])
-            .map(|(&a, &b)| i64::from(a) * i64::from(b))
-            .sum::<i64>()
+    // Widen each 4x i32 half to 4x i64 in registers before reducing so extreme
+    // inputs cannot wrap an intermediate 32-bit horizontal sum.
+    let lo128 = _mm256_castsi256_si128(sum);
+    let hi128 = _mm256_extracti128_si256::<1>(sum);
+    let sum64 = _mm256_add_epi64(_mm256_cvtepi32_epi64(lo128), _mm256_cvtepi32_epi64(hi128));
+    let sum128 = _mm_add_epi64(
+        _mm256_castsi256_si128(sum64),
+        _mm256_extracti128_si256::<1>(sum64),
+    );
+    let high64 = _mm_unpackhi_epi64(sum128, sum128);
+    let total = _mm_cvtsi128_si64(_mm_add_epi64(sum128, high64));
+    if at < count {
+        total
+            + inputs[at..count]
+                .iter()
+                .zip(&weights[at..count])
+                .map(|(&a, &b)| i64::from(a) * i64::from(b))
+                .sum::<i64>()
+    } else {
+        total
+    }
 }
 
 /// One mixer weight update: the first `count` inputs are trained with the
@@ -103,6 +144,23 @@ pub(super) struct MixerUpdate {
     pub(super) count: usize,
     pub(super) error: i32,
     pub(super) shift: u8,
+}
+
+/// Updates one mixer weight using the exact symmetric-rounded SGD rule.
+#[inline]
+pub(super) fn train_one(input: i16, weight: &mut i16, error: i32, shift: u8) {
+    debug_assert!((20..=30).contains(&shift));
+    debug_assert!((-65535..=65535).contains(&error));
+    debug_assert!((-INPUT_LIMIT..=INPUT_LIMIT).contains(&input));
+    let half = 1i64 << (shift - 1);
+    let gradient = i64::from(error) * i64::from(input);
+    let delta = if gradient >= 0 {
+        (gradient + half) >> shift
+    } else {
+        -((-gradient + half) >> shift)
+    };
+    *weight = (i64::from(*weight) + delta).clamp(-i64::from(WEIGHT_LIMIT), i64::from(WEIGHT_LIMIT))
+        as i16;
 }
 
 #[inline]
@@ -117,16 +175,8 @@ fn train_scalar_range(
         error,
         shift,
     } = update;
-    let half = 1i64 << (shift - 1);
     for (weight, &input) in weights[start..count].iter_mut().zip(&inputs[start..count]) {
-        let gradient = i64::from(error) * i64::from(input);
-        let delta = if gradient >= 0 {
-            (gradient + half) >> shift
-        } else {
-            -((-gradient + half) >> shift)
-        };
-        *weight = (i64::from(*weight) + delta)
-            .clamp(-i64::from(WEIGHT_LIMIT), i64::from(WEIGHT_LIMIT)) as i16;
+        train_one(input, weight, error, shift);
     }
 }
 
@@ -161,6 +211,30 @@ pub(super) fn train_active(
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+unsafe fn update_eight(
+    inputs: *const i16,
+    weights: *const i16,
+    params: (
+        std::arch::x86_64::__m256i,
+        std::arch::x86_64::__m256i,
+        std::arch::x86_64::__m128i,
+    ),
+    bounds: (std::arch::x86_64::__m256i, std::arch::x86_64::__m256i),
+) -> std::arch::x86_64::__m256i {
+    use std::arch::x86_64::*;
+    let (error_vector, half, shift_count) = params;
+    let (lower, upper) = bounds;
+    let input = _mm256_cvtepi16_epi32(_mm_loadu_si128(inputs.cast()));
+    let old = _mm256_cvtepi16_epi32(_mm_loadu_si128(weights.cast()));
+    let gradient = _mm256_mullo_epi32(input, error_vector);
+    let magnitude = _mm256_add_epi32(_mm256_abs_epi32(gradient), half);
+    let delta = _mm256_sign_epi32(_mm256_srl_epi32(magnitude, shift_count), gradient);
+    _mm256_min_epi32(upper, _mm256_max_epi32(lower, _mm256_add_epi32(old, delta)))
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline]
 unsafe fn train_avx2(inputs: &[i16; INPUTS], weights: &mut [i16; INPUTS], update: MixerUpdate) {
     use std::arch::x86_64::*;
     let MixerUpdate {
@@ -168,32 +242,57 @@ unsafe fn train_avx2(inputs: &[i16; INPUTS], weights: &mut [i16; INPUTS], update
         error,
         shift,
     } = update;
-    let error_vector = _mm256_set1_epi32(error);
-    let half = _mm256_set1_epi32(1 << (shift - 1));
-    let shift_vector = _mm256_set1_epi32(i32::from(shift));
-    let lower = _mm256_set1_epi32(-i32::from(WEIGHT_LIMIT));
-    let upper = _mm256_set1_epi32(i32::from(WEIGHT_LIMIT));
+    let params = (
+        _mm256_set1_epi32(error),
+        _mm256_set1_epi32(1 << (shift - 1)),
+        _mm_cvtsi32_si128(i32::from(shift)),
+    );
+    let bounds = (
+        _mm256_set1_epi32(-i32::from(WEIGHT_LIMIT)),
+        _mm256_set1_epi32(i32::from(WEIGHT_LIMIT)),
+    );
     let zero = _mm256_setzero_si256();
     let mut at = 0;
-    while at + 8 <= count {
-        let input = _mm256_cvtepi16_epi32(_mm_loadu_si128(inputs.as_ptr().add(at).cast()));
-        let old = _mm256_cvtepi16_epi32(_mm_loadu_si128(weights.as_ptr().add(at).cast()));
-        let gradient = _mm256_mullo_epi32(input, error_vector);
-        let magnitude = _mm256_add_epi32(_mm256_abs_epi32(gradient), half);
-        let delta = _mm256_sign_epi32(_mm256_srlv_epi32(magnitude, shift_vector), gradient);
-        let updated =
-            _mm256_min_epi32(upper, _mm256_max_epi32(lower, _mm256_add_epi32(old, delta)));
-        let packed = _mm256_packs_epi32(updated, zero);
-        // packs works independently in 128-bit lanes. Join the two groups
-        // of four updated weights before storing exactly eight elements.
-        let ordered = _mm256_permute4x64_epi64::<0xd8>(packed);
-        _mm_storeu_si128(
-            weights.as_mut_ptr().add(at).cast(),
-            _mm256_castsi256_si128(ordered),
+    while at + 16 <= count {
+        // SAFETY: at + 16 <= count <= INPUTS, so both 8-element i16 loads
+        // and the 16-element i16 store remain inside inputs and weights.
+        let updated_lo = update_eight(
+            inputs.as_ptr().add(at),
+            weights.as_ptr().add(at),
+            params,
+            bounds,
         );
-        at += 8;
+        let updated_hi = update_eight(
+            inputs.as_ptr().add(at + 8),
+            weights.as_ptr().add(at + 8),
+            params,
+            bounds,
+        );
+        let packed = _mm256_packs_epi32(updated_lo, updated_hi);
+        // packs works independently in 128-bit lanes; reorder to restore [lo, hi].
+        let ordered = _mm256_permute4x64_epi64::<0xd8>(packed);
+        _mm256_storeu_si256(weights.as_mut_ptr().add(at).cast(), ordered);
+        at += 16;
     }
-    train_scalar_range(inputs, weights, at, update);
+    if at < count {
+        while at + 8 <= count {
+            // SAFETY: at + 8 <= count <= INPUTS.
+            let updated = update_eight(
+                inputs.as_ptr().add(at),
+                weights.as_ptr().add(at),
+                params,
+                bounds,
+            );
+            let packed = _mm256_packs_epi32(updated, zero);
+            let ordered = _mm256_permute4x64_epi64::<0xd8>(packed);
+            _mm_storeu_si128(
+                weights.as_mut_ptr().add(at).cast(),
+                _mm256_castsi256_si128(ordered),
+            );
+            at += 8;
+        }
+        train_scalar_range(inputs, weights, at, update);
+    }
 }
 
 #[cfg(test)]

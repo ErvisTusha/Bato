@@ -5,12 +5,12 @@
 
 use super::{
     adapt::{Cell, RunMap},
-    apm::Apm,
+    apm::{Apm, BinHalf},
     coded_bits,
     context_map::{self, ContextMap},
     isse::Isse,
     logistic,
-    mixer::Mixer,
+    mixer::{LaneShape, Mixer},
     models::{
         matcher::{self, Matcher},
         neighbors::{self, Neighbors},
@@ -41,7 +41,7 @@ const EXPERT_SETS: usize = 256;
 const MIX_CONTEXTS: [usize; 3] = [256, 2048, 128];
 const FINAL_CONTEXTS: usize = 64;
 /// Calibration stages, each with this many contexts (powers of two).
-const APM_CONTEXTS: [usize; APM_STAGES] = [256, 128, 65536, 65536, 65536, 65536, 65536, 65536];
+const APM_CONTEXTS: [usize; APM_STAGES] = [256, 1024, 65536, 65536, 65536, 65536, 65536, 65536];
 const APM_STAGES: usize = 8;
 const ISSE_MAPS: [usize; 3] = [2, 4, 5];
 /// Features per context map.
@@ -91,6 +91,7 @@ pub(super) struct Predictor {
     table: Table,
     maps: [ContextMap; CONTEXTS],
     bases: [u64; CONTEXTS],
+    mixed_bases: [u64; CONTEXTS],
     base: [Cell; 256],
     run: RunMap,
     matcher: Matcher,
@@ -102,6 +103,8 @@ pub(super) struct Predictor {
     record_map: ContextMap,
     record_active: bool,
     record_base: u64,
+    mixed_record: u64,
+    apm_bases: [u64; 6],
     mixers: [Mixer; 3],
     final_mixer: Mixer,
     final_second: Mixer,
@@ -113,6 +116,7 @@ pub(super) struct Predictor {
     dispatch: Dispatch,
     expert_maps: [Vec<ContextMap>; EXPERTS],
     expert_bases: [[u64; EXPERT_CONTEXTS]; EXPERTS],
+    mixed_experts: [[u64; EXPERT_CONTEXTS]; EXPERTS],
     /// Experts with something to say for the current byte; dormant ones add
     /// a neutral input and skip their lookups and training.
     expert_active: [bool; EXPERTS],
@@ -176,6 +180,7 @@ impl Predictor {
             table: Table::new(length, table_log2)?,
             maps: std::array::from_fn(|_| ContextMap::new()),
             bases: [0; CONTEXTS],
+            mixed_bases: [0; CONTEXTS],
             base: [Cell::new(logistic::HALF, 0); 256],
             run: RunMap::default(),
             matcher: Matcher::new(length, table_log2)?,
@@ -187,6 +192,8 @@ impl Predictor {
             record_map: ContextMap::new(),
             record_active: false,
             record_base: 0,
+            mixed_record: 0,
+            apm_bases: [0; 6],
             mixers: [
                 Mixer::with_inputs(MIX_CONTEXTS[0], initial, MIXER_RATE, ACTIVE_INPUTS)?,
                 Mixer::with_inputs(MIX_CONTEXTS[1], initial, MIXER_RATE, ACTIVE_INPUTS)?,
@@ -213,26 +220,100 @@ impl Predictor {
             inputs: [0; INPUTS],
             second: [0; INPUTS],
             prefix: 1,
-            dispatch,
+            dispatch: dispatch.resolve(),
             expert_maps: EXPERT_SIZES.map(|size| (0..size).map(|_| ContextMap::new()).collect()),
             expert_bases: [[0; EXPERT_CONTEXTS]; EXPERTS],
+            mixed_experts: [[0; EXPERT_CONTEXTS]; EXPERTS],
             expert_active: [true; EXPERTS],
             expert_inputs: [[0; INPUTS]; EXPERTS],
             expert_mixers: {
-                let [a, b, c, d] = EXPERT_ACTIVE_INPUTS;
-                let build =
-                    |inputs| Mixer::with_inputs(EXPERT_SETS, expert_initial, MIXER_RATE, inputs);
-                [build(a)?, build(b)?, build(c)?, build(d)?]
+                let build = |e: usize| {
+                    Mixer::with_sparse_bias(
+                        EXPERT_SETS,
+                        expert_initial,
+                        MIXER_RATE,
+                        LaneShape {
+                            active: EXPERT_SIZES[e] * FEATURES,
+                            total: EXPERT_ACTIVE_INPUTS[e],
+                        },
+                    )
+                };
+                [build(0)?, build(1)?, build(2)?, build(3)?]
             },
             meter: None,
         })
     }
+    #[inline]
+    fn mix_nibble(base: u64, prefix: u16) -> u64 {
+        super::hash::mix(base ^ (u64::from(prefix) << 32))
+    }
+    #[inline]
+    fn depth_and_node(prefix: u16) -> (usize, usize) {
+        let depth = coded_bits(prefix) as usize;
+        let nibble_depth = depth % context_map::NIBBLE_BITS;
+        let node = if nibble_depth == 0 {
+            0
+        } else {
+            ((1usize << nibble_depth) | (usize::from(prefix) & ((1 << nibble_depth) - 1))) - 1
+        };
+        (depth, node)
+    }
+    #[inline]
+    fn prefetch_experts(&mut self, range: std::ops::Range<usize>, prefix: u16) {
+        for e in range.filter(|&e| self.expert_active[e]) {
+            for (mixed, &base) in self.mixed_experts[e][..EXPERT_SIZES[e]]
+                .iter_mut()
+                .zip(&self.expert_bases[e][..EXPERT_SIZES[e]])
+            {
+                let key = Self::mix_nibble(base, prefix);
+                *mixed = key;
+                self.table.prefetch(key);
+            }
+        }
+    }
+    #[inline]
+    fn prefetch_nibble(&mut self, prefix: u16) {
+        for (mixed, &base) in self.mixed_bases.iter_mut().zip(&self.bases) {
+            let key = Self::mix_nibble(base, prefix);
+            *mixed = key;
+            self.table.prefetch(key);
+        }
+        if self.record_active {
+            self.mixed_record = Self::mix_nibble(self.record_base, prefix);
+            self.table.prefetch(self.mixed_record);
+        }
+        self.prefetch_experts(0..EXPERTS, prefix);
+    }
     pub(super) fn probability(&mut self, history: &[u8]) -> u16 {
-        let depth = coded_bits(self.prefix) as usize;
+        #[cfg(target_arch = "x86_64")]
+        if self.dispatch.is_resolved_avx2() {
+            // SAFETY: `self.dispatch` was resolved via `is_x86_feature_detected!("avx2")`.
+            return unsafe { self.probability_avx2(history) };
+        }
+        self.probability_inner(history)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn probability_avx2(&mut self, history: &[u8]) -> u16 {
+        self.probability_inner(history)
+    }
+
+    #[inline(always)]
+    fn probability_inner(&mut self, history: &[u8]) -> u16 {
+        let (depth, node) = Self::depth_and_node(self.prefix);
         self.lap(Step::Coder);
         if self.prefix == 1 {
             self.bases[..order::COUNT].copy_from_slice(&order::contexts(history));
             self.bases[order::COUNT..].copy_from_slice(&self.words.contexts());
+            // Mix and issue main context-table prefetches before byte-level
+            // models run so DRAM fetches overlap with matcher, stride, rows
+            // and record scans.
+            for (mixed, &base) in self.mixed_bases.iter_mut().zip(&self.bases) {
+                let key = Self::mix_nibble(base, self.prefix);
+                *mixed = key;
+                self.table.prefetch(key);
+            }
             let last = history.last().copied().unwrap_or(0);
             let [word_byte, trigram] = self.words.text_contexts(last);
             self.expert_bases[0][..4].copy_from_slice(&[
@@ -252,8 +333,26 @@ impl Predictor {
                 self.expert_bases[1][i] =
                     super::hash::mix(value ^ ((i as u64 + 1) << 48) ^ SPARSE_SALT);
             }
+            self.prefetch_experts(0..2, self.prefix);
+            let apm_back = |k: usize| -> u64 {
+                history
+                    .len()
+                    .checked_sub(k)
+                    .map_or(0, |i| u64::from(history[i]))
+            };
+            let b1 = apm_back(1);
+            let b12 = (apm_back(2) << 8) | b1;
+            let b123 = (apm_back(3) << 16) | b12;
+            self.apm_bases = [
+                b1,
+                b12,
+                b123,
+                self.bases[order::COUNT],
+                self.bases[4] ^ 0x5bd1,
+                self.bases[order::COUNT + 1] ^ 0x9e37,
+            ];
             self.lap(Step::ByteContexts);
-            self.matcher.begin_byte(history);
+            self.matcher.begin_byte(history, self.bases[5]);
             self.lap(Step::ByteMatch);
             self.stride.begin_byte(
                 history,
@@ -273,30 +372,24 @@ impl Predictor {
             self.neighbors
                 .begin_byte(history, self.records.period().or(self.rows.period()));
             self.lap(Step::ByteRecords);
-        }
-        // The calibration rows are known now; load them while the contexts
-        // below are looked up and mixed.
-        let contexts = self.calibration_contexts(history, depth);
-        for (map, &context) in self.apms.iter().zip(&contexts) {
-            map.prefetch(context);
-        }
-        self.lap(Step::CalibrationSetup);
-        if depth.is_multiple_of(context_map::NIBBLE_BITS) {
-            let active = (0..EXPERTS).filter(|&e| self.expert_active[e]);
-            let experts = active.flat_map(|e| self.expert_bases[e][..EXPERT_SIZES[e]].iter());
-            for &base in self.bases.iter().chain(experts) {
-                self.table
-                    .prefetch(super::hash::mix(base ^ (u64::from(self.prefix) << 32)));
+            if self.record_active {
+                self.mixed_record = Self::mix_nibble(self.record_base, self.prefix);
+                self.table.prefetch(self.mixed_record);
             }
+            self.prefetch_experts(2..EXPERTS, self.prefix);
+        } else if depth == context_map::NIBBLE_BITS
+            && self.mixed_bases[0] != Self::mix_nibble(self.bases[0], self.prefix)
+        {
+            self.prefetch_nibble(self.prefix);
         }
         self.lap(Step::Prefetch);
         let mut hits = 0;
         for i in 0..CONTEXTS {
             self.inputs[i * FEATURES..(i + 1) * FEATURES].copy_from_slice(&self.maps[i].predict(
                 &mut self.table,
-                self.bases[i],
-                self.prefix,
+                self.mixed_bases[i],
                 depth,
+                node,
             ));
             hits += usize::from(self.maps[i].hit());
         }
@@ -308,9 +401,9 @@ impl Predictor {
             .copy_from_slice(&self.matcher.features(self.prefix));
         self.inputs[RECORD_INPUTS..RECORD_INPUTS + 3].fill(0);
         if self.record_active {
-            let features =
-                self.record_map
-                    .predict(&mut self.table, self.record_base, self.prefix, depth);
+            let features = self
+                .record_map
+                .predict(&mut self.table, self.mixed_record, depth, node);
             self.inputs[RECORD_INPUTS..RECORD_INPUTS + 3].copy_from_slice(&features[..3]);
         }
         self.inputs[ACTIVE_INPUTS - 1] = logistic::UNIT;
@@ -321,6 +414,8 @@ impl Predictor {
             hits * 8 + depth,
         ];
         self.lap(Step::ExtraInputs);
+        // Overlap neighbour template prefetches with the first-layer mixers.
+        self.neighbors.prefetch(self.prefix);
         for (i, mixer) in self.mixers.iter_mut().enumerate() {
             self.second[i] =
                 logistic::stretch(mixer.predict(&self.inputs, selectors[i], self.dispatch));
@@ -330,14 +425,27 @@ impl Predictor {
         self.second[TEMPLATE_INPUT..TEMPLATE_INPUT + neighbors::FEATURES - 1]
             .copy_from_slice(&neighbors[1..]);
         self.lap(Step::FirstMixers);
+        // Prefetch large APM stages after ContextMaps so they do not evict
+        // main context-table fetches from Line Fill Buffers, overlapping them
+        // with experts, final mixers and ISSE instead.
+        let contexts = self.calibration_contexts(depth);
+        let half = if self.second[0] >= 0 {
+            BinHalf::High
+        } else {
+            BinHalf::Low
+        };
+        for (map, &context) in self.apms.iter().zip(&contexts) {
+            map.prefetch(context, half);
+        }
+        self.lap(Step::CalibrationSetup);
         for e in (0..EXPERTS).filter(|&e| self.expert_active[e]) {
             for i in 0..EXPERT_SIZES[e] {
                 self.expert_inputs[e][i * FEATURES..(i + 1) * FEATURES].copy_from_slice(
                     &self.expert_maps[e][i].predict(
                         &mut self.table,
-                        self.expert_bases[e][i],
-                        self.prefix,
+                        self.mixed_experts[e][i],
                         depth,
+                        node,
                     ),
                 );
             }
@@ -397,35 +505,53 @@ impl Predictor {
         }
     }
     /// Contexts of the calibration stages, applied in this order: the partial
-    /// byte; the match state; the partial byte with two and with three
+    /// byte; the match state, predicted bit and high class bits; the partial
+    /// byte with two and with three
     /// previous bytes; the order-4, current-word and word-pair contexts; and
     /// the byte the match model expects. Each refines the previous stage's
     /// output. A stage keyed by one previous byte made files 0.064% larger in
     /// the ablation study of docs/validation.md and was removed.
-    fn calibration_contexts(&self, history: &[u8], depth: usize) -> [usize; APM_STAGES] {
-        let back = |k: usize| -> u64 {
-            history
-                .len()
-                .checked_sub(k)
-                .map_or(0, |i| u64::from(history[i]))
-        };
+    fn calibration_contexts(&self, depth: usize) -> [usize; APM_STAGES] {
         let prefix = u64::from(self.prefix);
         let expected = self.matcher.expected();
         let match_class = expected.map_or(0, |(byte, _)| usize::from(byte >> 6));
+        let match_bit = expected.map_or(0, |(byte, _)| usize::from((byte >> (7 - depth)) & 1));
         let expected_byte = expected.map_or(0x100, |(byte, _)| u64::from(byte));
-        let hashed = |base: u64, salt: u64| super::hash::mix(base ^ (prefix << 52) ^ salt) as usize;
+        let p52 = prefix << 52;
         [
             usize::from(self.prefix) - 1,
-            (self.matcher.state() * 8 + depth) ^ (match_class << 3),
-            super::hash::mix((prefix << 16) | (back(2) << 8) | back(1)) as usize,
-            super::hash::mix((prefix << 24) | (back(3) << 16) | (back(2) << 8) | back(1)) as usize,
-            hashed(self.bases[order::COUNT], 0),
-            hashed(self.bases[4], 0x5bd1),
-            hashed(self.bases[order::COUNT + 1], 0x9e37),
-            super::hash::mix((prefix << 24) | (expected_byte << 8) | back(1)) as usize,
+            (self.matcher.state() * 8 + depth) | (match_bit << 7) | (match_class << 8),
+            super::hash::mix((prefix << 16) | self.apm_bases[1]) as usize,
+            super::hash::mix((prefix << 24) | self.apm_bases[2]) as usize,
+            super::hash::mix(self.apm_bases[3] ^ p52) as usize,
+            super::hash::mix(self.apm_bases[4] ^ p52) as usize,
+            super::hash::mix(self.apm_bases[5] ^ p52) as usize,
+            super::hash::mix((prefix << 24) | (expected_byte << 8) | self.apm_bases[0]) as usize,
         ]
     }
     pub(super) fn observe(&mut self, bit: u8) {
+        #[cfg(target_arch = "x86_64")]
+        if self.dispatch.is_resolved_avx2() {
+            // SAFETY: `self.dispatch` was resolved via `is_x86_feature_detected!("avx2")`.
+            unsafe { self.observe_avx2(bit) };
+            return;
+        }
+        self.observe_inner(bit);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn observe_avx2(&mut self, bit: u8) {
+        self.observe_inner(bit);
+    }
+
+    #[inline(always)]
+    fn observe_inner(&mut self, bit: u8) {
+        if (8..16).contains(&self.prefix) {
+            let next_prefix = (self.prefix << 1) | u16::from(bit);
+            self.prefetch_nibble(next_prefix);
+        }
+        let (depth, node) = Self::depth_and_node(self.prefix);
         for map in &mut self.apms {
             map.observe(bit);
         }
@@ -442,16 +568,16 @@ impl Predictor {
         for e in (0..EXPERTS).filter(|&e| self.expert_active[e]) {
             self.expert_mixers[e].observe(&self.expert_inputs[e], bit);
             for map in &mut self.expert_maps[e][..EXPERT_SIZES[e]] {
-                map.observe(&mut self.table, bit);
+                map.observe(&mut self.table, depth, node, bit);
             }
         }
         self.lap(Step::TrainExperts);
         self.neighbors.observe(bit);
         for map in &mut self.maps {
-            map.observe(&mut self.table, bit);
+            map.observe(&mut self.table, depth, node, bit);
         }
         if self.record_active {
-            self.record_map.observe(&mut self.table, bit);
+            self.record_map.observe(&mut self.table, depth, node, bit);
         }
         self.base[usize::from(self.prefix) - 1].train(bit, ORDER0_LIMIT);
         self.matcher.observe(self.prefix, bit);

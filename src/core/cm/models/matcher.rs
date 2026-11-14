@@ -3,18 +3,21 @@
 //! Data Compression Explained and ZPAQ section 3.4. The original Rust uses the
 //! caller's already-observed segment prefix, with no duplicate history buffer.
 
-use super::super::{coded_bits, hash, logistic};
+use super::super::{coded_bits, logistic};
 use crate::core::{memory::try_filled, types::BatoError};
 /// Smallest match index, in entries.
 const MIN_ENTRIES: usize = 16;
 /// log2 of the largest match index, in entries, whatever the table cap.
 const MAX_ENTRIES_LOG2: u8 = 22;
-/// Bytes hashed to find a match candidate.
+/// Bytes hashed to find a match candidate (computed by the order-6 context).
+#[cfg(test)]
 const ORDER: usize = 6;
 /// Verified length at which a candidate becomes an active match.
 const MIN_LENGTH: u16 = 6;
 /// Bytes compared backwards when verifying a new candidate.
 const VERIFY_LIMIT: usize = 1024;
+/// Number of candidate positions tracked per 6-byte context hash bucket.
+const WAYS: usize = 4;
 /// Largest tracked match length.
 const MAX_LENGTH: u16 = 4095;
 /// Surprise numerator: a 1-byte match predicts with error 1/8.
@@ -34,6 +37,7 @@ fn entries(length: usize, cap: u8) -> usize {
         .max(MIN_ENTRIES)
         .next_power_of_two()
         .min(1usize << cap.min(MAX_ENTRIES_LOG2))
+        .max(WAYS)
 }
 pub(in crate::core::cm) fn memory_required(length: usize, cap: u8) -> usize {
     entries(length, cap) * 4
@@ -58,35 +62,58 @@ impl Matcher {
             expected: 0,
         })
     }
-    pub(in crate::core::cm) fn begin_byte(&mut self, history: &[u8]) {
+    pub(in crate::core::cm) fn begin_byte(&mut self, history: &[u8], order6_hash: u64) {
         let pos = history.len();
         if self.last_position == pos {
             return;
         }
         self.last_position = pos;
-        let key = hash::bytes(history, ORDER) as usize & (self.index.len() - 1);
+        let bucket = (order6_hash as usize & ((self.index.len() / WAYS) - 1)) * WAYS;
         if self.active {
             self.candidate += 1;
             self.length = self.length.saturating_add(1).min(MAX_LENGTH);
             self.active = self.candidate < pos;
         }
+        let min_len = usize::from(MIN_LENGTH);
         if !self.active {
             self.length = 0;
-            let previous = self.index[key];
-            if previous != 0 {
-                self.candidate = previous as usize - 1;
-                if self.candidate < pos {
-                    while usize::from(self.length) < pos.min(self.candidate).min(VERIFY_LIMIT)
-                        && history[pos - usize::from(self.length) - 1]
-                            == history[self.candidate - usize::from(self.length) - 1]
-                    {
-                        self.length += 1;
+            if pos >= min_len {
+                let target6 = &history[pos - min_len..pos];
+                for &previous in &self.index[bucket..bucket + WAYS] {
+                    if previous == 0 {
+                        break;
+                    }
+                    let cand = previous as usize - 1;
+                    if cand >= pos {
+                        continue;
+                    }
+                    let limit = pos.min(cand).min(VERIFY_LIMIT);
+                    let best = usize::from(self.length);
+                    if limit < min_len || limit <= best {
+                        continue;
+                    }
+                    if best >= min_len && history[pos - best - 1] != history[cand - best - 1] {
+                        continue;
+                    }
+                    if &history[cand - min_len..cand] != target6 {
+                        continue;
+                    }
+                    let mut len = min_len;
+                    while len < limit && history[pos - len - 1] == history[cand - len - 1] {
+                        len += 1;
+                    }
+                    if len as u16 > self.length {
+                        self.length = len as u16;
+                        self.candidate = cand;
                     }
                 }
             }
             self.active = self.length >= MIN_LENGTH;
         }
-        self.index[key] = (pos as u32) + 1;
+        let [s0, s1, s2, _] = self.index[bucket..bucket + WAYS] else {
+            unreachable!()
+        };
+        self.index[bucket..bucket + WAYS].copy_from_slice(&[(pos as u32) + 1, s0, s1, s2]);
         if self.active {
             self.expected = history[self.candidate];
         }
@@ -136,15 +163,17 @@ impl Matcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::cm::hash;
     #[test]
     fn matches_only_predict_from_the_observed_prefix_and_recover_after_a_miss() {
         let raw = b"abcdefabcdefabcdef-X-abcdefabcdefabcdef";
         let mut model = Matcher::new(raw.len(), 16).unwrap();
         let mut active = 0;
         for (pos, &byte) in raw.iter().enumerate() {
-            model.begin_byte(&raw[..pos]);
+            let order6 = hash::bytes(&raw[..pos], ORDER);
+            model.begin_byte(&raw[..pos], order6);
             let before = (model.candidate, model.length, model.active);
-            model.begin_byte(&raw[..pos]);
+            model.begin_byte(&raw[..pos], order6);
             assert_eq!(before, (model.candidate, model.length, model.active));
             if model.active {
                 assert!(model.candidate < pos);

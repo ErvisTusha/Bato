@@ -18,23 +18,23 @@ const LEARNING_SHIFT: u32 = 22;
 #[derive(Clone)]
 pub(super) struct Isse {
     weights: [[i16; 2]; 256],
-    state: usize,
+    state: u8,
     input: i16,
     prediction: u16,
 }
 
 #[inline]
-fn rounded(value: i64, shift: u32) -> i32 {
-    let half = 1i64 << (shift - 1);
+fn rounded(value: i32, shift: u32) -> i32 {
+    let half = 1i32 << (shift - 1);
     if value < 0 {
-        -(((-value + half) >> shift) as i32)
+        -((-value + half) >> shift)
     } else {
-        ((value + half) >> shift) as i32
+        (value + half) >> shift
     }
 }
 
 impl Isse {
-    pub(super) fn new() -> Self {
+    pub(super) const fn new() -> Self {
         Self {
             weights: [[SCALE as i16, 0]; 256],
             state: 0,
@@ -45,13 +45,14 @@ impl Isse {
 
     #[inline]
     pub(super) fn predict(&mut self, probability: u16, state: u8) -> u16 {
-        self.state = usize::from(state);
+        self.state = state;
         self.input = logistic::stretch(probability);
-        let weights = self.weights[self.state];
-        // |weight| <= 32767 and |input| <= 4096, so the complete sum is
-        // below 2^28. Explicit i64 intermediates keep reference semantics.
-        let sum = i64::from(weights[0]) * i64::from(self.input)
-            + i64::from(weights[1]) * i64::from(logistic::UNIT);
+        let weights = self.weights[usize::from(self.state)];
+        // |weight| <= 32767 and |input| <= 4096, so |sum| + (1 << 13) <= 1.43e8 < i32::MAX.
+        const _: () = assert!(logistic::LIMIT <= 4096);
+        const _: () = assert!(LIMIT == i16::MAX as i32);
+        let sum = i32::from(weights[0]) * i32::from(self.input)
+            + i32::from(weights[1]) * i32::from(logistic::UNIT);
         let logit = rounded(sum, SCALE_BITS).clamp(-logistic::LIMIT, logistic::LIMIT);
         self.prediction = logistic::squash(logit);
         self.prediction
@@ -65,13 +66,15 @@ impl Isse {
         } else {
             0
         } - i32::from(self.prediction);
-        // The largest product is 65535*4096 < 2^28. This rate is an SGD
-        // step of 1/4096 in natural-logit units, with symmetric rounding.
+        // |error * input| <= 65535 * 4096 < 2^28; adding half (2^21) fits i32.
         let changes = [
-            rounded(i64::from(error) * i64::from(self.input), LEARNING_SHIFT),
-            rounded(i64::from(error) * i64::from(logistic::UNIT), LEARNING_SHIFT),
+            rounded(error * i32::from(self.input), LEARNING_SHIFT),
+            rounded(error * i32::from(logistic::UNIT), LEARNING_SHIFT),
         ];
-        for (weight, change) in self.weights[self.state].iter_mut().zip(changes) {
+        for (weight, change) in self.weights[usize::from(self.state)]
+            .iter_mut()
+            .zip(changes)
+        {
             *weight = (i32::from(*weight) + change).clamp(-LIMIT, LIMIT) as i16;
         }
     }

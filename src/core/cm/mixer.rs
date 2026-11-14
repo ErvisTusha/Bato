@@ -16,12 +16,19 @@ use crate::core::{memory::try_filled, types::BatoError};
 const SCALE_BITS: u8 = 2;
 /// log2 of weight 1.0 before `SCALE_BITS`: weights share the 1/256 logit unit.
 const UNIT_BITS: u8 = 8;
+/// Active feature lanes and total padded length ending with the bias lane.
+#[derive(Clone, Copy)]
+pub(super) struct LaneShape {
+    pub(super) active: usize,
+    pub(super) total: usize,
+}
 #[derive(Clone)]
 pub(super) struct Mixer {
     weights: Vec<[i16; INPUTS]>,
     selected: usize,
     prediction: u16,
     rate_shift: u8,
+    active_lanes: usize,
     inputs: usize,
     dispatch: Dispatch,
 }
@@ -43,9 +50,26 @@ impl Mixer {
         rate_shift: u8,
         inputs: usize,
     ) -> Result<Self, BatoError> {
+        Self::with_sparse_bias(
+            contexts,
+            initial,
+            rate_shift,
+            LaneShape {
+                active: inputs,
+                total: inputs,
+            },
+        )
+    }
+    pub(super) fn with_sparse_bias(
+        contexts: usize,
+        initial: [i16; INPUTS],
+        rate_shift: u8,
+        shape: LaneShape,
+    ) -> Result<Self, BatoError> {
         if !contexts.is_power_of_two()
-            || inputs == 0
-            || inputs > INPUTS
+            || shape.active == 0
+            || shape.active > shape.total
+            || shape.total > INPUTS
             || !(20..=30).contains(&rate_shift)
             || initial
                 .iter()
@@ -67,7 +91,8 @@ impl Mixer {
             selected: 0,
             prediction: 32768,
             rate_shift,
-            inputs,
+            active_lanes: shape.active,
+            inputs: shape.total,
             dispatch: Dispatch::Native,
         })
     }
@@ -80,8 +105,14 @@ impl Mixer {
     ) -> u16 {
         self.selected = context & (self.weights.len() - 1);
         self.dispatch = dispatch;
-        let logit = (simd::dot_active(inputs, &self.weights[self.selected], self.inputs, dispatch)
-            >> (UNIT_BITS + SCALE_BITS))
+        let weights = &self.weights[self.selected];
+        let mut sum = simd::dot_active(inputs, weights, self.active_lanes, dispatch);
+        if self.active_lanes < self.inputs {
+            let bias = self.inputs - 1;
+            debug_assert!(inputs[self.active_lanes..bias].iter().all(|&x| x == 0));
+            sum += i64::from(inputs[bias]) * i64::from(weights[bias]);
+        }
+        let logit = (sum >> (UNIT_BITS + SCALE_BITS))
             .clamp(i64::from(-logistic::LIMIT), i64::from(logistic::LIMIT))
             as i32;
         self.prediction = logistic::squash(logit);
@@ -95,16 +126,16 @@ impl Mixer {
             0
         } - i64::from(self.prediction);
         let update = simd::MixerUpdate {
-            count: self.inputs,
+            count: self.active_lanes,
             error: error as i32,
             shift: self.rate_shift - SCALE_BITS,
         };
-        simd::train_active(
-            inputs,
-            &mut self.weights[self.selected],
-            update,
-            self.dispatch,
-        );
+        let weights = &mut self.weights[self.selected];
+        simd::train_active(inputs, weights, update, self.dispatch);
+        if self.active_lanes < self.inputs {
+            let bias = self.inputs - 1;
+            simd::train_one(inputs[bias], &mut weights[bias], update.error, update.shift);
+        }
     }
 }
 

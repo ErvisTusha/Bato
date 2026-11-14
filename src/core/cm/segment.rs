@@ -80,7 +80,7 @@ const SNAPSHOT_BYTES: usize = 1 << 21;
 /// same length copy it instead of training again. Copying gives the state
 /// training would, so the archive does not depend on it.
 struct Snapshot {
-    model: Option<(usize, Predictor)>,
+    model: Option<std::sync::Arc<(usize, Predictor)>>,
     wanted: bool,
 }
 
@@ -89,6 +89,12 @@ impl Snapshot {
         Self {
             model: None,
             wanted,
+        }
+    }
+    fn shared(model: Option<std::sync::Arc<(usize, Predictor)>>) -> Self {
+        Self {
+            model,
+            wanted: false,
         }
     }
 }
@@ -301,16 +307,28 @@ pub(crate) fn encode_segment(
             .map(|&transform| filters::forward(raw, transform))
             .collect::<Result<Vec<_>, _>>()?;
         let limit = winner.0;
+        let shared = (raw.len() <= SNAPSHOT_BYTES
+            && concurrent_models_fit(descriptor, raw.len(), 2 * transforms.len() + 1))
+        .then(|| {
+            let total = PRIMER.len() + raw.len();
+            Predictor::new(total, descriptor.table_log2, Dispatch::Native).map(|mut model| {
+                timing.time(Step::PrimerTraining, || prime(&mut model, PRIMER));
+                std::sync::Arc::new((total, model))
+            })
+        })
+        .transpose()?;
         let outcomes: Vec<_> = std::thread::scope(|scope| {
             let runs: Vec<_> = inputs
                 .iter()
                 .map(|input| {
+                    let shared = shared.clone();
                     scope.spawn(move || {
+                        let mut snapshot = Snapshot::shared(shared);
                         model_candidate(
                             input,
                             (descriptor, trials, descriptor.segment_bytes()),
                             limit,
-                            (timing, &mut Snapshot::new(false)),
+                            (timing, &mut snapshot),
                         )
                     })
                 })
@@ -334,7 +352,7 @@ pub(crate) fn encode_segment(
     // Two or more primed candidates of this length follow: train once.
     let mut snapshot = Snapshot::new(
         raw.len() <= SNAPSHOT_BYTES
-            && trials == Trials::Parallel
+            && concurrent_models_fit(descriptor, raw.len(), 2)
             && (x86.is_some() || filters::CANDIDATES.contains(&selected_filter)),
     );
     if min_frame < winner.0 {
@@ -576,8 +594,8 @@ fn encode_model(
     let kept = snapshot
         .as_ref()
         .and_then(|snapshot| snapshot.model.as_ref())
-        .filter(|(length, _)| *length == total)
-        .map(|(_, model)| model.clone());
+        .filter(|arc| arc.0 == total)
+        .map(|arc| arc.1.clone());
     let mut model = match kept {
         Some(model) => model,
         None => {
@@ -585,7 +603,7 @@ fn encode_model(
             run.timing
                 .time(Step::PrimerTraining, || prime(&mut model, primer));
             if let Some(snapshot) = snapshot.filter(|snapshot| snapshot.wanted) {
-                snapshot.model = Some((total, model.clone()));
+                snapshot.model = Some(std::sync::Arc::new((total, model.clone())));
             }
             model
         }
@@ -808,8 +826,18 @@ mod tests {
                 .filter(|c| c.kind == BlockType::Coded)
                 .all(|c| c.payload.len() < c.length as usize));
         }
+        let mut snapshot = Snapshot::new(true);
+        let run = Run {
+            primer: Primer::Read,
+            dispatch: Dispatch::Native,
+            budget: None,
+            max_bytes: descriptor.segment_bytes(),
+            timing: Timing::off(),
+        };
         for byte in 0..=255u8 {
-            let chunks = encode(&[byte], descriptor).unwrap();
+            let chunks = encode_model(&[byte], descriptor, run, Some(&mut snapshot))
+                .unwrap()
+                .unwrap();
             assert_eq!(decode(&chunks, descriptor, 1).unwrap(), [byte]);
         }
         assert!(encode(&vec![0; s + 1], descriptor).is_err());

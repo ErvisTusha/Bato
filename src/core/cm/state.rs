@@ -175,10 +175,10 @@ const fn initial_probabilities() -> [u16; 256] {
     }
     probabilities
 }
-static INITIAL: [u16; 256] = initial_probabilities();
+const INITIAL: [u16; 256] = initial_probabilities();
 #[inline]
-pub(super) fn initial_probability(state: u8) -> u16 {
-    INITIAL[usize::from(state)]
+pub(super) const fn initial_probability(state: u8) -> u16 {
+    INITIAL[state as usize]
 }
 
 #[cfg(test)]
