@@ -47,12 +47,16 @@ is marked "not measured".
 | Bato 0.8.0 | 1.16 | x86-64 RIP-relative transform; x86 rewrite beside deflate streams |
 | Bato 0.8.0 | 1.17 | segment reach for the x86 transforms |
 | Bato 0.8.0 | 1.18 | the segment reach qualifies on its own |
+| Bato 0.8.0 | 1.19 | pixel templates in the bit-neighbourhood model |
+| Bato 0.8.0 | 1.20 | record periods from equal bytes |
+| Bato 0.8.0 | 1.21 | 4-way associative matcher and CM engine speedups |
+| Bato 0.8.0 | 1.22 | de-aliased match APM context (1024 bins) and hot-path vectorization |
 
 ## Development, held-out and fresh sets (total compressed bytes)
 
 | Set | Original | 0.7 | 1.9 | 1.10 | **1.11** | gzip | zip | rar | 7z | xz |
 |---|---|---|---|---|---|---|---|---|---|---|
-| Pilot, 11 files | 2,810,784 | 357,616 | 341,001 | 339,610 | **339,935** (1.12: 339,961) | 730,732 | 732,269 | 512,223 | 494,801 | 493,080 |
+| Pilot, 11 files | 2,810,784 | 357,616 | 341,001 | 339,610 | **339,935** (1.12: 339,961; 1.20: 336,324; 1.21: 336,254; 1.22: **335,885**) | 730,732 | 732,269 | 512,223 | 494,801 | 493,080 |
 | Held-out, 31 files | 1,728,724 | 400,224 | 377,880 | 377,966 | **378,287** (1.12: 378,287) | 585,999 | 590,838 | 542,651 | 513,273 | 509,668 |
 | Fresh, 56 files | 609,660 | 303,173 | 186,041 | 185,752 | **185,956** (1.12: 185,838) | 319,336 | 327,426 | 327,585 | 321,819 | 317,492 |
 

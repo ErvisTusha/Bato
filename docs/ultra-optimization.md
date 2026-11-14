@@ -1,5 +1,8 @@
 # Bato single-mode size and speed work
 
+> [!NOTE]
+> Historical development notes from the format 1.18 optimization campaign. For current architecture, wire format, and benchmark validation, see [docs/format.md](format.md) and [docs/validation.md](validation.md).
+
 Bato has one compression policy: seek the smallest complete lossless archive. This
 work does not introduce fast/balanced presets, loosen validation, or change the
 1.18 decoder syntax.
