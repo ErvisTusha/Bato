@@ -1,4 +1,16 @@
+<div align="center">
+
 # Bato
+
+### ⚠️ DO NOT USE — UNDER HEAVY DEVELOPMENT ⚠️
+
+**Bato is in active, heavy development and is NOT fully tested.**<br>
+**The archive format and wire protocols change daily with breaking changes and NO backward compatibility.**<br>
+**DO NOT USE FOR CRITICAL DATA OR PRODUCTION STORAGE.**
+
+---
+
+</div>
 
 Bato is an original, lossless, byte-oriented context-mixing compressor and archiver written in pure Rust.
 
