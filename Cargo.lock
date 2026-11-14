@@ -132,6 +132,7 @@ version = "0.8.0"
 dependencies = [
  "age",
  "libc",
+ "libloading",
  "pollster",
  "reed-solomon-erasure",
  "rustix",

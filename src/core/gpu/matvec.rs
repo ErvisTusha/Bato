@@ -1,16 +1,21 @@
-//! Integer matrix-vector kernel: the CPU reference, the GPU kernel and a
-//! runner that uses both at once. Provenance: original.
+//! Integer matrix-vector kernel: the CPU reference, the wgpu and CUDA kernels
+//! and a runner that uses the CPU and a device at once. Provenance: original.
 //!
 //! Each output is `clamp(sum(weight * input) >> OUTPUT_SHIFT, ±OUTPUT_LIMIT)`
 //! with the sum taken in 64 bits, the arithmetic of a mixer layer. Every path
 //! returns the same integers, so a result never depends on whether a GPU was
 //! present.
 
-use super::{words, Gpu, GpuError, Kernel};
+use super::{
+    cuda::{Argument, Cuda, Function, Memory, Pinned},
+    words, Gpu, GpuError, Kernel,
+};
 
-/// Fractional bits dropped from each sum; `matvec.wgsl` repeats the value.
+/// Fractional bits dropped from each sum; `matvec.wgsl` and `cuda/kernels.cu`
+/// repeat the value.
 pub const OUTPUT_SHIFT: u32 = 10;
-/// Largest magnitude of an output; `matvec.wgsl` repeats the value.
+/// Largest magnitude of an output; `matvec.wgsl` and `cuda/kernels.cu` repeat
+/// the value.
 pub const OUTPUT_LIMIT: i32 = 2047;
 /// Rows per workgroup, the `@workgroup_size` of `matvec.wgsl`.
 const WORKGROUP_ROWS: usize = 64;
@@ -151,6 +156,106 @@ impl GpuMatVec {
     }
 }
 
+/// The kernel on a CUDA device, holding its weights in device memory.
+pub struct CudaMatVec {
+    cuda: Cuda,
+    shape: Shape,
+    function: Function,
+    weights: Memory,
+    inputs: Memory,
+    outputs: Memory,
+    host_inputs: Pinned<i16>,
+    host_outputs: Pinned<i32>,
+}
+
+impl CudaMatVec {
+    /// Uploads `weights` and prepares the kernel for `shape`.
+    pub fn new(cuda: &Cuda, weights: &[i16], shape: Shape) -> Result<Self, GpuError> {
+        shape.check(weights.len(), shape.cols)?;
+        if shape.rows > u32::MAX as usize || shape.cols > u32::MAX as usize {
+            return Err(GpuError::Shape(format!(
+                "{} rows by {} columns exceeds the kernel's 32-bit counts",
+                shape.rows, shape.cols
+            )));
+        }
+        let host_inputs = Pinned::new(cuda, shape.cols)?;
+        Ok(Self {
+            cuda: cuda.clone(),
+            shape,
+            function: cuda.function(c"matvec")?,
+            weights: Memory::uploaded(cuda, weights)?,
+            inputs: Memory::uploaded(cuda, host_inputs.as_slice())?,
+            outputs: Memory::zeroed(cuda, shape.rows)?,
+            host_inputs,
+            host_outputs: Pinned::new(cuda, shape.rows)?,
+        })
+    }
+
+    /// Runs the kernel on `inputs` and reads the outputs back. Mutates the
+    /// kernel's device and host buffers.
+    pub fn run(&mut self, inputs: &[i16]) -> Result<&[i32], GpuError> {
+        if inputs.len() != self.shape.cols {
+            return Err(GpuError::Shape(format!(
+                "{} inputs for {} columns",
+                inputs.len(),
+                self.shape.cols
+            )));
+        }
+        self.host_inputs.as_mut_slice().copy_from_slice(inputs);
+        self.inputs.write(self.host_inputs.as_slice())?;
+        let arguments = [
+            self.weights.argument(),
+            self.inputs.argument(),
+            self.outputs.argument(),
+            Argument::Word(self.shape.rows as u32),
+            Argument::Word(self.shape.cols as u32),
+        ];
+        self.cuda
+            .launch(self.function, self.shape.rows, &arguments)?;
+        self.outputs.read(self.host_outputs.as_mut_slice())?;
+        Ok(self.host_outputs.as_slice())
+    }
+}
+
+/// The device a hybrid run shares the rows with.
+#[derive(Clone, Copy)]
+pub enum Accelerator<'a> {
+    None,
+    Wgpu(&'a Gpu),
+    Cuda(&'a Cuda),
+}
+
+/// A device kernel of either kind.
+enum Device {
+    Wgpu(Box<GpuMatVec>),
+    Cuda(Box<CudaMatVec>),
+}
+
+impl Device {
+    /// Runs the kernel and writes its outputs to `outputs`. Mutates the
+    /// kernel's buffers.
+    fn run_into(&mut self, inputs: &[i16], outputs: &mut [i32]) -> Result<(), GpuError> {
+        let short = || GpuError::Execution("the device returned too few rows".into());
+        match self {
+            Self::Wgpu(kernel) => {
+                let rows = kernel.run(inputs)?;
+                if rows.len() != outputs.len() {
+                    return Err(short());
+                }
+                outputs.copy_from_slice(&rows);
+            }
+            Self::Cuda(kernel) => {
+                let rows = kernel.run(inputs)?;
+                if rows.len() != outputs.len() {
+                    return Err(short());
+                }
+                outputs.copy_from_slice(rows);
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Which processors produced a result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Processors {
@@ -158,76 +263,74 @@ pub enum Processors {
     CpuAndGpu,
 }
 
-/// The kernel on the GPU and the CPU at once: the GPU computes the first
-/// `gpu_rows` rows while the CPU threads compute the rest. Without a GPU, or
-/// when the GPU fails, the CPU computes every row; the outputs are the same.
+/// The kernel on a device and the CPU at once: the device computes the first
+/// `device_rows` rows while the CPU threads compute the rest. Without a
+/// device, or when it fails, the CPU computes every row; the outputs are the
+/// same.
 pub struct HybridMatVec {
     weights: Vec<i16>,
     shape: Shape,
-    gpu: Option<GpuMatVec>,
-    gpu_rows: usize,
+    device: Option<Device>,
+    device_rows: usize,
 }
 
 impl HybridMatVec {
-    /// Prepares the kernel; `gpu_rows` of the rows go to `gpu` when present.
+    /// Prepares the kernel; `device_rows` of the rows go to `accelerator`
+    /// when there is one.
     pub fn new(
-        gpu: Option<&Gpu>,
+        accelerator: Accelerator<'_>,
         weights: Vec<i16>,
         shape: Shape,
-        gpu_rows: usize,
+        device_rows: usize,
     ) -> Result<Self, GpuError> {
         shape.check(weights.len(), shape.cols)?;
-        let gpu_rows = gpu_rows.min(shape.rows);
-        let kernel = match gpu {
-            Some(gpu) if gpu_rows > 0 => {
-                let part = Shape {
-                    rows: gpu_rows,
-                    cols: shape.cols,
-                };
-                Some(GpuMatVec::new(
-                    gpu,
-                    &weights[..gpu_rows * shape.cols],
-                    part,
-                )?)
+        let device_rows = device_rows.min(shape.rows);
+        let part = Shape {
+            rows: device_rows,
+            cols: shape.cols,
+        };
+        let share = &weights[..device_rows * shape.cols];
+        let device = match accelerator {
+            _ if device_rows == 0 => None,
+            Accelerator::None => None,
+            Accelerator::Wgpu(gpu) => {
+                Some(Device::Wgpu(Box::new(GpuMatVec::new(gpu, share, part)?)))
             }
-            _ => None,
+            Accelerator::Cuda(cuda) => {
+                Some(Device::Cuda(Box::new(CudaMatVec::new(cuda, share, part)?)))
+            }
         };
         Ok(Self {
+            device_rows: if device.is_some() { device_rows } else { 0 },
             weights,
             shape,
-            gpu: kernel,
-            gpu_rows: if gpu.is_some() { gpu_rows } else { 0 },
+            device,
         })
     }
 
     /// Computes every output and says which processors took part. Mutates the
-    /// GPU kernel's device buffers.
+    /// device kernel's buffers.
     pub fn run(&mut self, inputs: &[i16]) -> Result<(Vec<i32>, Processors), GpuError> {
         self.shape.check(self.weights.len(), inputs.len())?;
         let mut outputs = vec![0; self.shape.rows];
-        let split = self.gpu_rows * self.shape.cols;
-        let (gpu_part, cpu_part) = outputs.split_at_mut(self.gpu_rows);
-        let (gpu_weights, cpu_weights) = self.weights.split_at(split);
-        let Some(kernel) = &mut self.gpu else {
+        let split = self.device_rows * self.shape.cols;
+        let (device_part, cpu_part) = outputs.split_at_mut(self.device_rows);
+        let (device_weights, cpu_weights) = self.weights.split_at(split);
+        let Some(device) = &mut self.device else {
             fill_rows_threaded(cpu_weights, inputs, cpu_part);
             return Ok((outputs, Processors::Cpu));
         };
-        let from_gpu = std::thread::scope(|scope| {
+        let from_device = std::thread::scope(|scope| {
             scope.spawn(|| fill_rows_threaded(cpu_weights, inputs, cpu_part));
-            kernel.run(inputs)
+            device.run_into(inputs, device_part)
         });
-        match from_gpu {
-            Ok(rows) if rows.len() == gpu_part.len() => {
-                gpu_part.copy_from_slice(&rows);
-                Ok((outputs, Processors::CpuAndGpu))
-            }
+        if from_device.is_err() {
             // A lost or failing device is not an error of the computation:
             // the CPU computes the same rows.
-            _ => {
-                fill_rows_threaded(gpu_weights, inputs, gpu_part);
-                Ok((outputs, Processors::Cpu))
-            }
+            fill_rows_threaded(device_weights, inputs, device_part);
+            return Ok((outputs, Processors::Cpu));
         }
+        Ok((outputs, Processors::CpuAndGpu))
     }
 }
 
@@ -289,7 +392,7 @@ mod tests {
     }
 
     #[test]
-    fn shader_is_valid_and_repeats_the_kernel_constants() {
+    fn kernels_are_valid_and_repeat_the_constants() {
         super::super::validate_shader(SHADER);
         for constant in [
             format!("const OUTPUT_SHIFT: u32 = {OUTPUT_SHIFT}u;"),
@@ -297,6 +400,13 @@ mod tests {
             format!("@workgroup_size({WORKGROUP_ROWS})"),
         ] {
             assert!(SHADER.contains(&constant), "{constant}");
+        }
+        let source = include_str!("cuda/kernels.cu");
+        for constant in [
+            format!("#define OUTPUT_SHIFT {OUTPUT_SHIFT}"),
+            format!("#define OUTPUT_LIMIT {OUTPUT_LIMIT}"),
+        ] {
+            assert!(source.contains(&constant), "{constant}");
         }
     }
 
@@ -306,7 +416,7 @@ mod tests {
         assert!(reference(&[0; 5], &[0; 3], shape).is_err());
         assert!(reference(&[0; 6], &[0; 2], shape).is_err());
         assert!(reference(&[], &[], Shape { rows: 0, cols: 0 }).is_err());
-        assert!(HybridMatVec::new(None, vec![0; 5], shape, 1).is_err());
+        assert!(HybridMatVec::new(Accelerator::None, vec![0; 5], shape, 1).is_err());
     }
 
     #[test]
@@ -318,27 +428,45 @@ mod tests {
         let weights = values(shape.rows * shape.cols, 1);
         let inputs: Vec<i16> = values(shape.cols, 2).iter().map(|x| x >> 4).collect();
         let expected = reference(&weights, &inputs, shape).unwrap();
-        let mut cpu = HybridMatVec::new(None, weights.clone(), shape, 600).unwrap();
+        let mut cpu = HybridMatVec::new(Accelerator::None, weights.clone(), shape, 600).unwrap();
         assert_eq!(
             cpu.run(&inputs).unwrap(),
             (expected.clone(), Processors::Cpu)
         );
-        let gpu = match Gpu::probe() {
-            Ok(gpu) => gpu,
-            Err(reason) => {
-                eprintln!("GPU parity not run on this machine: {reason}");
-                return;
+        let wgpu = Gpu::probe().inspect_err(|reason| eprintln!("wgpu parity not run: {reason}"));
+        let cuda = Cuda::probe().inspect_err(|reason| eprintln!("CUDA parity not run: {reason}"));
+        let accelerators = [
+            wgpu.as_ref().map(Accelerator::Wgpu).ok(),
+            cuda.as_ref().map(Accelerator::Cuda).ok(),
+        ];
+        for accelerator in accelerators.into_iter().flatten() {
+            for device_rows in [1, 63, 64, 65, 600, 1000] {
+                let mut hybrid =
+                    HybridMatVec::new(accelerator, weights.clone(), shape, device_rows).unwrap();
+                for _ in 0..2 {
+                    assert_eq!(
+                        hybrid.run(&inputs).unwrap(),
+                        (expected.clone(), Processors::CpuAndGpu)
+                    );
+                }
             }
+        }
+    }
+
+    #[test]
+    fn cuda_kernel_saturates_like_the_reference() {
+        let Ok(cuda) = Cuda::probe() else {
+            return;
         };
-        for gpu_rows in [1, 63, 64, 65, 600, 1000] {
-            let mut hybrid =
-                HybridMatVec::new(Some(&gpu), weights.clone(), shape, gpu_rows).unwrap();
-            for _ in 0..2 {
-                assert_eq!(
-                    hybrid.run(&inputs).unwrap(),
-                    (expected.clone(), Processors::CpuAndGpu)
-                );
-            }
+        for (weight, input) in [(i16::MIN, i16::MIN), (i16::MAX, i16::MIN), (3, 7), (0, 0)] {
+            let shape = Shape { rows: 5, cols: 300 };
+            let weights = vec![weight; shape.rows * shape.cols];
+            let inputs = vec![input; shape.cols];
+            let mut kernel = CudaMatVec::new(&cuda, &weights, shape).unwrap();
+            assert_eq!(
+                kernel.run(&inputs).unwrap(),
+                reference(&weights, &inputs, shape).unwrap()
+            );
         }
     }
 }

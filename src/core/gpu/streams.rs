@@ -7,16 +7,21 @@
 //! device with no round trip per step, so this measures how fast a processor
 //! advances serial model work and how many such streams it holds at once.
 
-use super::{words, Gpu, GpuError, Kernel};
+use super::{
+    cuda::{Argument, Cuda, Function, Memory},
+    words, Gpu, GpuError, Kernel,
+};
 
-/// Value of a cell that has only seen one bits; `streams.wgsl` repeats it.
+/// Value of a cell that has only seen one bits; `streams.wgsl` and
+/// `cuda/kernels.cu` repeat it.
 const CELL_ONE: u32 = 65535;
-/// Adaptation rate of a cell as a shift; `streams.wgsl` repeats it.
+/// Adaptation rate of a cell as a shift; `streams.wgsl` and `cuda/kernels.cu`
+/// repeat it.
 const RATE_SHIFT: u32 = 4;
 /// Streams per workgroup, the `@workgroup_size` of `streams.wgsl`.
 const WORKGROUP_STREAMS: usize = 64;
-/// Steps every stream takes in one GPU dispatch: short enough that a dispatch
-/// ends well within a driver's watchdog time.
+/// Steps every stream takes in one device dispatch: short enough that a
+/// dispatch ends well within a driver's watchdog time.
 pub const DISPATCH_STEPS: u32 = 1 << 14;
 /// Largest table of one stream as a power of two of 32-bit cells.
 const MAX_CELLS_LOG2: u32 = 30;
@@ -189,6 +194,47 @@ impl GpuStreams {
     }
 }
 
+/// The streams on a CUDA device, with tables and states in device memory.
+pub struct CudaStreams {
+    cuda: Cuda,
+    layout: Layout,
+    function: Function,
+    table: Memory,
+    states: Memory,
+}
+
+impl CudaStreams {
+    pub fn new(cuda: &Cuda, layout: Layout) -> Result<Self, GpuError> {
+        let cells = layout.cells()?;
+        Ok(Self {
+            cuda: cuda.clone(),
+            layout,
+            function: cuda.function(c"streams")?,
+            table: Memory::zeroed(cuda, cells)?,
+            states: Memory::uploaded(cuda, &seeds(layout.streams))?,
+        })
+    }
+
+    /// Advances every stream by `dispatches * DISPATCH_STEPS` steps, mutating
+    /// the device tables and states, and returns the states.
+    pub fn advance(&mut self, dispatches: u32) -> Result<Vec<u32>, GpuError> {
+        let arguments = [
+            self.table.argument(),
+            self.states.argument(),
+            Argument::Word(self.layout.streams as u32),
+            Argument::Word(self.layout.cells_log2),
+            Argument::Word(DISPATCH_STEPS),
+        ];
+        for _ in 0..dispatches {
+            self.cuda
+                .launch(self.function, self.layout.streams, &arguments)?;
+        }
+        let mut states = vec![0; self.layout.streams];
+        self.states.read(&mut states)?;
+        Ok(states)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,16 +283,19 @@ mod tests {
         assert!(one.table.iter().any(|&cell| cell > 0));
     }
 
+    /// Layouts for device parity: one stream, a partial block and several.
+    const PARITY_LAYOUTS: [(usize, u32); 3] = [(1, 10), (65, 8), (200, 12)];
+
     #[test]
-    fn gpu_streams_equal_the_cpu_streams() {
+    fn wgpu_streams_equal_the_cpu_streams() {
         let gpu = match Gpu::probe() {
             Ok(gpu) => gpu,
             Err(reason) => {
-                eprintln!("GPU parity not run on this machine: {reason}");
+                eprintln!("wgpu parity not run on this machine: {reason}");
                 return;
             }
         };
-        for (streams, cells_log2) in [(1, 10), (65, 8), (200, 12)] {
+        for (streams, cells_log2) in PARITY_LAYOUTS {
             let layout = Layout {
                 streams,
                 cells_log2,
@@ -258,6 +307,41 @@ mod tests {
                 let expected = cpu.advance(dispatches * DISPATCH_STEPS, Threads::All);
                 assert_eq!(device.advance(dispatches).unwrap(), expected);
             }
+        }
+    }
+
+    #[test]
+    fn cuda_streams_equal_the_cpu_streams() {
+        let cuda = match Cuda::probe() {
+            Ok(cuda) => cuda,
+            Err(reason) => {
+                eprintln!("CUDA parity not run on this machine: {reason}");
+                return;
+            }
+        };
+        for (streams, cells_log2) in PARITY_LAYOUTS {
+            let layout = Layout {
+                streams,
+                cells_log2,
+            };
+            let mut cpu = CpuStreams::new(layout).unwrap();
+            let mut device = CudaStreams::new(&cuda, layout).unwrap();
+            assert_eq!(device.advance(0).unwrap(), cpu.states);
+            for dispatches in [1, 3] {
+                let expected = cpu.advance(dispatches * DISPATCH_STEPS, Threads::All);
+                assert_eq!(device.advance(dispatches).unwrap(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn cuda_source_repeats_the_kernel_constants() {
+        let source = include_str!("cuda/kernels.cu");
+        for constant in [
+            format!("#define CELL_ONE {CELL_ONE}u"),
+            format!("#define RATE_SHIFT {RATE_SHIFT}"),
+        ] {
+            assert!(source.contains(&constant), "{constant}");
         }
     }
 }

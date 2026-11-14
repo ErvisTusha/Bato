@@ -1,12 +1,14 @@
 //! GPU compute beside the CPU workers, with a CPU path that gives the same
 //! integers when no GPU is present.
-//! Provenance: original; the device is driven through the public WebGPU
-//! compute model as implemented by the `wgpu` crate (MIT OR Apache-2.0).
+//! Provenance: original; a device is driven either through the public WebGPU
+//! compute model as implemented by the `wgpu` crate (MIT OR Apache-2.0), or,
+//! for NVIDIA, through the CUDA Driver API in `cuda`.
 //!
 //! Nothing in the codec calls this module yet: archives do not depend on it.
 //! It exists to measure, on real hardware, which integer workloads a GPU
 //! finishes sooner than the CPU with identical results.
 
+pub mod cuda;
 pub mod matvec;
 pub mod streams;
 
@@ -100,6 +102,18 @@ impl Gpu {
             "{} ({:?}, {} {})",
             self.info.name, self.info.device_type, self.info.driver, self.info.driver_info
         )
+    }
+
+    /// Submits no work and waits for the device: the cost of a call alone.
+    pub fn idle_call(&self) -> Result<(), GpuError> {
+        let encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        self.queue.submit([encoder.finish()]);
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map(|_| ())
+            .map_err(|error| GpuError::Execution(error.to_string()))
     }
 
     /// Whether a storage buffer of `words` values and a dispatch of `groups`
