@@ -6,8 +6,7 @@
 //! returns the same integers, so a result never depends on whether a GPU was
 //! present.
 
-use super::{Gpu, GpuError};
-use wgpu::util::DeviceExt;
+use super::{words, Gpu, GpuError, Kernel};
 
 /// Fractional bits dropped from each sum; `matvec.wgsl` repeats the value.
 pub const OUTPUT_SHIFT: u32 = 10;
@@ -15,8 +14,6 @@ pub const OUTPUT_SHIFT: u32 = 10;
 pub const OUTPUT_LIMIT: i32 = 2047;
 /// Rows per workgroup, the `@workgroup_size` of `matvec.wgsl`.
 const WORKGROUP_ROWS: usize = 64;
-/// Bytes of one 32-bit value in a GPU buffer.
-const WORD: usize = 4;
 const SHADER: &str = include_str!("matvec.wgsl");
 
 /// Rows and columns of the weight matrix.
@@ -82,20 +79,15 @@ pub fn reference(weights: &[i16], inputs: &[i16], shape: Shape) -> Result<Vec<i3
 }
 
 /// Widens 16-bit values to the 32-bit words of a GPU buffer.
-fn words(values: &[i16]) -> Vec<u8> {
-    values
-        .iter()
-        .flat_map(|&value| i32::from(value).to_ne_bytes())
-        .collect()
+fn widened(values: &[i16]) -> Vec<u8> {
+    words(values.iter().map(|&value| i32::from(value) as u32))
 }
 
 /// The kernel on a GPU, holding its weights in device memory.
 pub struct GpuMatVec {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    gpu: Gpu,
     shape: Shape,
-    pipeline: wgpu::ComputePipeline,
-    bindings: wgpu::BindGroup,
+    kernel: Kernel,
     inputs: wgpu::Buffer,
     outputs: wgpu::Buffer,
     staging: wgpu::Buffer,
@@ -105,87 +97,37 @@ impl GpuMatVec {
     /// Uploads `weights` and compiles the kernel for `shape`.
     pub fn new(gpu: &Gpu, weights: &[i16], shape: Shape) -> Result<Self, GpuError> {
         shape.check(weights.len(), shape.cols)?;
-        let limits = gpu.device.limits();
-        let weight_bytes = (weights.len() as u64).saturating_mul(WORD as u64);
-        let groups = shape.rows.div_ceil(WORKGROUP_ROWS) as u64;
-        if weight_bytes > limits.max_storage_buffer_binding_size
-            || weight_bytes > limits.max_buffer_size
-            || groups > u64::from(limits.max_compute_workgroups_per_dimension)
-        {
+        if !gpu.fits(weights.len(), shape.rows.div_ceil(WORKGROUP_ROWS)) {
             return Err(GpuError::Shape(format!(
                 "{} rows by {} columns exceeds the device limits",
                 shape.rows, shape.cols
             )));
         }
-        let device = gpu.device.clone();
-        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let storage = |label, contents: &[u8], usage| {
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(label),
-                contents,
-                usage,
-            })
-        };
-        let weight_buffer = storage("weights", &words(weights), wgpu::BufferUsages::STORAGE);
-        let inputs = storage(
-            "inputs",
-            &vec![0; shape.cols * WORD],
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        );
-        let outputs = storage(
-            "outputs",
-            &vec![0; shape.rows * WORD],
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        );
-        let params: Vec<u8> = [shape.rows as u32, shape.cols as u32]
-            .into_iter()
-            .flat_map(u32::to_ne_bytes)
-            .collect();
-        let params = storage("params", &params, wgpu::BufferUsages::UNIFORM);
-        let staging = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("staging"),
-            size: (shape.rows * WORD) as u64,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("matvec"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
-        });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("matvec"),
-            layout: None,
-            module: &module,
-            entry_point: Some("main"),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            cache: None,
-        });
-        let buffers = [&weight_buffer, &inputs, &outputs, &params];
-        let entries: Vec<_> = buffers
-            .iter()
-            .zip(0..)
-            .map(|(buffer, binding)| wgpu::BindGroupEntry {
-                binding,
-                resource: buffer.as_entire_binding(),
-            })
-            .collect();
-        let bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("matvec"),
-            layout: &pipeline.get_bind_group_layout(0),
-            entries: &entries,
-        });
-        if let Some(error) = pollster::block_on(scope.pop()) {
-            return Err(GpuError::Device(error.to_string()));
-        }
-        Ok(Self {
-            device,
-            queue: gpu.queue.clone(),
-            shape,
-            pipeline,
-            bindings,
-            inputs,
-            outputs,
-            staging,
+        gpu.validated(|| {
+            let weights = gpu.uploaded(&widened(weights), wgpu::BufferUsages::STORAGE);
+            let inputs = gpu.zeroed(
+                shape.cols,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            );
+            let outputs = gpu.zeroed(
+                shape.rows,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            );
+            let params = gpu.uploaded(
+                &words([shape.rows as u32, shape.cols as u32]),
+                wgpu::BufferUsages::UNIFORM,
+            );
+            Self {
+                gpu: gpu.clone(),
+                shape,
+                kernel: gpu.kernel(SHADER, &[&weights, &inputs, &outputs, &params]),
+                staging: gpu.zeroed(
+                    shape.rows,
+                    wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                ),
+                inputs,
+                outputs,
+            }
         })
     }
 
@@ -199,43 +141,13 @@ impl GpuMatVec {
                 self.shape.cols
             )));
         }
-        let failed = |error: &dyn std::fmt::Display| GpuError::Execution(error.to_string());
-        self.queue.write_buffer(&self.inputs, 0, &words(inputs));
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.bindings, &[]);
-            pass.dispatch_workgroups(self.shape.rows.div_ceil(WORKGROUP_ROWS) as u32, 1, 1);
-        }
-        encoder.copy_buffer_to_buffer(&self.outputs, 0, &self.staging, 0, None);
-        self.queue.submit([encoder.finish()]);
-        let (mapped, result) = std::sync::mpsc::channel();
-        self.staging
-            .map_async(wgpu::MapMode::Read, .., move |outcome| {
-                // The receiver is gone only when `run` already returned an error.
-                let _ = mapped.send(outcome);
-            });
-        self.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|error| failed(&error))?;
-        result
-            .recv()
-            .map_err(|error| failed(&error))?
-            .map_err(|error| failed(&error))?;
-        let outputs = {
-            let view = self
-                .staging
-                .get_mapped_range(..)
-                .map_err(|error| failed(&error))?;
-            view.chunks_exact(WORD)
-                .map(|word| i32::from_ne_bytes([word[0], word[1], word[2], word[3]]))
-                .collect()
-        };
-        self.staging.unmap();
-        Ok(outputs)
+        self.gpu
+            .queue
+            .write_buffer(&self.inputs, 0, &widened(inputs));
+        let groups = self.shape.rows.div_ceil(WORKGROUP_ROWS) as u32;
+        let pass = self.gpu.pass(&self.kernel, groups);
+        let outputs = self.gpu.read(pass, &self.outputs, &self.staging)?;
+        Ok(outputs.into_iter().map(|value| value as i32).collect())
     }
 }
 
@@ -378,13 +290,7 @@ mod tests {
 
     #[test]
     fn shader_is_valid_and_repeats_the_kernel_constants() {
-        let module = wgpu::naga::front::wgsl::parse_str(SHADER).unwrap();
-        wgpu::naga::valid::Validator::new(
-            wgpu::naga::valid::ValidationFlags::all(),
-            wgpu::naga::valid::Capabilities::empty(),
-        )
-        .validate(&module)
-        .unwrap();
+        super::super::validate_shader(SHADER);
         for constant in [
             format!("const OUTPUT_SHIFT: u32 = {OUTPUT_SHIFT}u;"),
             format!("const OUTPUT_LIMIT: i32 = {OUTPUT_LIMIT};"),
