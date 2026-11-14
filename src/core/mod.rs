@@ -2,6 +2,7 @@ pub mod archive;
 pub mod checksum;
 pub mod codec;
 pub mod frame;
+pub mod gpu;
 pub mod jobs;
 pub mod memory;
 pub mod recovery;
