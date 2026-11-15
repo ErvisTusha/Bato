@@ -11,9 +11,9 @@ keywords = ["compression", "lossless", "context-mixing", "rust"]
 categories = ["compression", "algorithms"]
 
 [features]
-# Preserve both existing GPU backends in normal builds.
+# One platform executable includes every Rust GPU backend and CPU fallback by default.
 # Each backend can also be selected alone with --no-default-features.
-default = ["cuda", "wgpu"]
+default = ["cuda", "hip", "level-zero", "metal", "wgpu"]
 # Backwards-compatible umbrella feature for callers that already use "gpu".
 gpu = ["cuda", "wgpu"]
 cuda = ["dep:libloading"]
