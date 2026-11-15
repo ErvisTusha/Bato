@@ -125,6 +125,7 @@ pub(super) fn inverse(raw: &mut [u8], t: TransformId) -> Result<(), BatoError> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "gpu")]
     #[test]
     fn wgpu_filters_match_cpu_at_word_tile_and_tail_boundaries() {
         use super::super::{
@@ -209,6 +210,7 @@ mod tests {
         assert!(stats.snapshot().wgpu_filter_dispatches > 0);
     }
 
+    #[cfg(feature = "gpu")]
     #[test]
     fn cuda_filters_match_cpu_at_word_tile_and_tail_boundaries() {
         use crate::core::gpu::cuda::{filters::apply, Cuda};
