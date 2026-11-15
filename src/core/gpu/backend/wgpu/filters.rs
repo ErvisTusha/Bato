@@ -1,8 +1,8 @@
 //! Integer implementations of the archive byte filters for wgpu.
 //! Provenance: original packed-word port of the sibling CPU and CUDA filters.
 
-use super::{words, Gpu};
 use super::super::super::{filters::Direction, GpuError};
+use super::{words, Gpu};
 use crate::core::types::TransformId;
 use std::{sync::mpsc, time::Duration};
 use wgpu::{
