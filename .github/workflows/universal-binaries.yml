@@ -16,6 +16,13 @@ on:
 permissions:
   contents: read
 
+# A newer push/PR supersedes older runs of this workflow on the same branch.
+# Include the workflow name so separate workflows on the latest SHA can
+# complete concurrently rather than cancelling one another.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
+
 jobs:
   universal:
     name: ${{ matrix.artifact }}
