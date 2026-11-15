@@ -241,4 +241,35 @@ mod tests {
         assert_eq!(std::mem::size_of::<u32>(), 4);
         assert_eq!(ABI_VERSION, 1);
     }
+
+    #[test]
+    fn native_plugin_fixture_matches_cpu_filter_and_inverse() {
+        // GitHub CI sets BATO_TEST_NATIVE_PLUGIN after building the reference
+        // C fixture. Ordinary runs do not need any native library.
+        if std::env::var_os("BATO_TEST_NATIVE_PLUGIN").is_none() {
+            return;
+        }
+        let plugin = Plugin::open(NativeKind::Hip).unwrap();
+        let sizes = [1, 2, 3, 4, 7, 63, 65, 4095, 4096, 4097, 8193];
+        for size in sizes {
+            let bytes = (0..size)
+                .map(|i| ((i * 127 + i / 3 + 91) & 255) as u8)
+                .collect::<Vec<_>>();
+            for transform in [
+                TransformId::Delta1,
+                TransformId::Delta2,
+                TransformId::Delta4,
+                TransformId::Shuffle2,
+                TransformId::Shuffle4,
+            ] {
+                let encoded = plugin
+                    .run(0, &bytes, transform, Direction::Forward)
+                    .unwrap();
+                let restored = plugin
+                    .run(0, &encoded, transform, Direction::Inverse)
+                    .unwrap();
+                assert_eq!(restored, bytes, "{transform:?}, input {size}");
+            }
+        }
+    }
 }
