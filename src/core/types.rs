@@ -33,6 +33,7 @@ pub enum BatoError {
     InvalidOptions(String),
     Cuda(String),
     Wgpu(String),
+    Native(String),
     CorruptStream(String),
     UnknownBlockType(u8),
     UnknownTransformId(u8),
@@ -75,6 +76,7 @@ impl fmt::Display for BatoError {
             Self::InvalidOptions(s) => write!(f, "Invalid options: {s}"),
             Self::Cuda(reason) => write!(f, "CUDA byte filters: {reason}"),
             Self::Wgpu(reason) => write!(f, "wgpu byte filters: {reason}"),
+            Self::Native(reason) => write!(f, "native GPU byte filters: {reason}"),
             Self::CorruptStream(s) => write!(f, "Corrupted stream: {s}"),
             Self::UnknownBlockType(v) => write!(f, "Unknown block type: {v}"),
             Self::UnknownTransformId(v) => write!(f, "Unknown transform ID: {v}"),
@@ -115,6 +117,10 @@ pub struct ExecutionStatsSnapshot {
     pub cuda_fallback: String,
     pub wgpu_filter_dispatches: u64,
     pub wgpu_filter_bytes: u64,
+    /// Successfully dispatched native HIP, Level Zero or Metal filters.
+    pub native_filter_dispatches: u64,
+    pub native_filter_bytes: u64,
+    pub native_device: String,
     /// Devices that successfully completed at least one archive filter.
     pub gpu_devices: Vec<String>,
     pub gpu_fallback: String,
@@ -164,6 +170,12 @@ pub enum Compute {
     Cuda,
     /// Require a supported hardware adapter through wgpu for eligible filters.
     Wgpu,
+    /// Require a native AMD HIP plugin (compiled with ROCm/HIP SDK).
+    Hip,
+    /// Require Intel oneAPI's native Level Zero SYCL backend plugin.
+    LevelZero,
+    /// Require a direct Apple Metal compute plugin.
+    Metal,
 }
 
 #[derive(Debug, Clone, Default)]
