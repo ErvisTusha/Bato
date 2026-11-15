@@ -114,7 +114,7 @@ The payload is a binary arithmetic code: 32-bit interval, 16-bit probabilities, 
 * a row expert (`src/core/cm/models/rows.rs`, normative): every 32,768 bytes, once 16,384 + 31,232 bytes of history exist, the distance in 16..16,384 bytes whose sampled mean difference is lowest, if under 9/16 of the median over all distances, is taken as the row distance, and the distance in 1..4 with the lowest difference as the sample unit; eight contexts built from the left, upper, upper-left and upper-right neighbours, quantised neighbour differences and the previous sample's vertical difference feed a fourth auxiliary expert (constant when no row is known);
 * three first-layer mixers, two final mixers whose outputs are averaged (selected by the previous byte's high bits and by the match model's state), three state-conditioned calibrators and eight chained APMs (partial byte; match state with predicted bit and high byte class; two and three previous bytes; order 4; current word; word pair; expected match byte), each blending 1:1 with the previous stage's output.
 
-All arithmetic is integer, so every platform produces identical bytes.
+All arithmetic is integer, so every platform decodes the same bytes. The encoder picks the segment size from the input length and its worker count, so the same input compressed with different thread counts gives different archives.
 
 ### Reversible transforms
 

@@ -11,13 +11,6 @@ pub const VERSION_MINOR: u8 = 22;
 pub const MAX_CHUNK_SIZE: usize = 1024 * 1024;
 pub const DEFAULT_SEGMENT_SIZE: usize = 64 * 1024 * 1024;
 pub const DEFAULT_CHUNK_SIZE: usize = 256 * 1024;
-/// Independent streams (segments) a large input is spread over, so that this
-/// many cores code and decode it at once. Fixed, never derived from the
-/// machine, so an archive's bytes do not depend on where it was made.
-/// Measured on a 7.5 MB executable (1 stream = 1,691,899 bytes): 2 streams
-/// cost +2.0% and decode 1.8x faster, 4 cost +3.6% and 3.0x, 8 cost +6.2% and
-/// 3.3x; more streams than cores only lose size.
-pub const AUTO_STREAMS: u64 = 4;
 /// Smallest automatic segment, in bytes. Below two of these an input stays one
 /// stream: on 508 KB of text, 2 streams cost +4.1% and 4 cost +8.0%.
 pub const MIN_AUTO_SEGMENT: usize = 1024 * 1024;
@@ -216,6 +209,16 @@ pub struct ExecutionOptions {
     pub stats: std::sync::Arc<ExecutionStats>,
 }
 impl ExecutionOptions {
+    /// Requested worker threads, with 0 meaning every available CPU.
+    pub(crate) fn worker_threads(&self) -> usize {
+        if self.threads == 0 {
+            std::thread::available_parallelism()
+                .map_or(1, usize::from)
+                .min(MAX_THREADS)
+        } else {
+            self.threads
+        }
+    }
     pub fn validate(&self) -> Result<(), BatoError> {
         if self.threads > MAX_THREADS {
             return Err(BatoError::InvalidOptions(format!(
@@ -417,19 +420,21 @@ impl Default for Geometry {
     }
 }
 impl Geometry {
-    /// The geometry to code an input of `length` bytes with. A segment size
-    /// left at `DEFAULT_SEGMENT_SIZE` is chosen from the length: inputs below
-    /// two minimum segments stay one stream, larger ones up to one default
-    /// segment are spread over `AUTO_STREAMS` independent streams, and
-    /// anything beyond keeps the default. Other segment sizes are kept.
-    pub fn for_input(self, length: u64) -> Geometry {
-        if self.segment_size != DEFAULT_SEGMENT_SIZE
-            || length < 2 * MIN_AUTO_SEGMENT as u64
-            || length > DEFAULT_SEGMENT_SIZE as u64
-        {
+    /// The geometry to code an input of `length` bytes with, spread over
+    /// `workers` threads. A segment size left at `DEFAULT_SEGMENT_SIZE` is
+    /// chosen from the length: inputs below two minimum segments stay one
+    /// stream; anything larger is cut into about one independent stream per
+    /// worker (a power-of-two segment between `MIN_AUTO_SEGMENT` and the
+    /// default), so that every worker codes and decodes at once. The archive
+    /// therefore depends on the thread count used to make it. Measured on a
+    /// 7.5 MB executable (1 stream = 1,691,899 bytes): 2 streams cost +2.0%
+    /// and decode 1.8x faster, 4 cost +3.6% and 3.0x, 8 cost +6.2% and 3.3x.
+    /// Other segment sizes are kept.
+    pub fn for_input(self, length: u64, workers: usize) -> Geometry {
+        if self.segment_size != DEFAULT_SEGMENT_SIZE || length < 2 * MIN_AUTO_SEGMENT as u64 {
             return self;
         }
-        let share = length.div_ceil(AUTO_STREAMS);
+        let share = length.div_ceil(workers.max(1) as u64);
         let segment = usize::try_from(share.next_power_of_two()).unwrap_or(DEFAULT_SEGMENT_SIZE);
         Geometry {
             segment_size: segment.clamp(MIN_AUTO_SEGMENT, DEFAULT_SEGMENT_SIZE),
@@ -474,10 +479,11 @@ pub struct CompressionOptions {
 impl CompressionOptions {
     /// These options with the geometry the known input length calls for.
     pub(crate) fn resolved(&self) -> CompressionOptions {
+        let workers = self.execution.worker_threads();
         CompressionOptions {
-            geometry: self
-                .input_length
-                .map_or(self.geometry, |length| self.geometry.for_input(length)),
+            geometry: self.input_length.map_or(self.geometry, |length| {
+                self.geometry.for_input(length, workers)
+            }),
             ..self.clone()
         }
     }

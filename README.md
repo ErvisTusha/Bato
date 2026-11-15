@@ -20,7 +20,7 @@ It operates under one strict, non-negotiable policy: **compressed size > decompr
 
 - **Universal Byte Archiver:** Compresses arbitrary byte contents (executables, invalid UTF-8, media, pre-compressed streams, or unknown formats). Decisions depend purely on byte statistics and entropy models—never on file extensions, MIME types, or names.
 - **Context-Mixing Engine:** An adaptive ensemble model featuring order 0–7 hashed context maps, a 4-way associative match model, record-stride and row experts, secondary symbol estimators (ISSE), and chained adaptive probability maps (APM).
-- **Bit-Identical Determinism:** Pure integer arithmetic everywhere (no floating point, clocks, RNG, or scheduling-dependent float operations). Output is bit-identical across all CPU architectures and thread counts.
+- **Portable Decoding:** Pure integer arithmetic everywhere (no floating point, clocks, RNG, or scheduling-dependent float operations), so any CPU architecture decodes any archive. Large inputs are cut into about one independent segment per worker thread, so archive bytes depend on the thread count used to compress.
 - **Built-in Reversible Transforms:** Deflate stream discovery and recompression, x86 and x86-64 branch and RIP-relative address translation, byte delta, and 2D byte planes, all gated by exact byte-cost selection with raw fallback.
 - **Integrity & Safety:** CRC32C chunk checksums, SHA-256 identities, directory traversal defense, staged atomic extraction, and bounded memory allocation.
 

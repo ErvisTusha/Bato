@@ -49,10 +49,12 @@
   filename conversion; portable path restrictions live in `docs/format.md`.
 - Incompressible data is stored raw with bounded overhead; never claim every
   input shrinks.
-- Bit-identical output on every platform and thread count: integer only
-  (enforced by `cm_sources_are_integer_only`), no RNG, clocks, floats,
-  hash-map order or scheduling-dependent results. Pseudo-random values come
-  only from fixed-seed integer hashes.
+- The model is integer only (enforced by `cm_sources_are_integer_only`): no
+  RNG, clocks, floats, hash-map order or scheduling-dependent results, so any
+  machine decodes any archive. Pseudo-random values come only from fixed-seed
+  integer hashes. Archive bytes are not required to be identical across
+  machines or thread counts: the automatic segment count follows the worker
+  count.
 - Keep checksums, bounded memory and output, path, symlink and device-file
   safety, and staged extraction.
 - Multicore: independent segments run on all admitted workers. No GPU path

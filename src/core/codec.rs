@@ -37,14 +37,7 @@ pub(crate) fn admit(
 ) -> Result<Admission, BatoError> {
     options.validate()?;
     let per_worker = segment::memory_required(descriptor, direction)?.saturating_add(STACK_MEMORY);
-    let desired = if options.threads == 0 {
-        std::thread::available_parallelism()
-            .map(usize::from)
-            .unwrap_or(1)
-            .min(MAX_THREADS)
-    } else {
-        options.threads
-    };
+    let desired = options.worker_threads();
     let workers = budget
         .saturating_sub(HOST_RESERVE)
         .checked_div(per_worker)
