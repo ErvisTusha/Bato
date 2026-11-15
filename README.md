@@ -31,8 +31,18 @@ It operates under one strict, non-negotiable policy: **compressed size > decompr
 Requires a recent Rust toolchain (Rust 1.89+).
 
 ```bash
-cargo build --release --locked
+cargo build --release --locked                           # Existing GPU-capable build
+cargo build --release --locked --no-default-features     # Pure CPU build, no GPU dependencies
 ```
+
+The `gpu` Cargo feature is enabled by default and contains the existing
+NVIDIA CUDA and cross-platform wgpu filter implementations. The CPU-only
+build retains the same archive format and deterministic CPU transforms.
+In a CPU-only build, `--compute auto` and `--compute cpu` use the CPU;
+explicit `--compute cuda` or `--compute wgpu` reports an unavailable
+backend rather than silently ignoring the request. Dedicated native AMD
+HIP, Intel Level Zero and direct Metal backends are **not implemented** yet.
+
 
 The compiled binary will be placed at `target/release/bato`.
 
