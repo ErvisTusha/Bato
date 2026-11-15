@@ -61,7 +61,54 @@ pub(super) fn inverse_on(
     inverse(raw, transform)
 }
 
-pub(crate) fn forward(raw: &[u8], t: TransformId) -> Result<Vec<u8>, BatoError> {
+/// Validate GPU bytes directly against Bato's integer filter rules,
+/// without allocating another segment-sized CPU reference buffer.
+/// The inverse delta check is inductive: previous output bytes must already
+/// have passed validation, so a wrong first value cannot be hidden.
+pub(crate) fn matches_exact_filter(
+    input: &[u8],
+    output: &[u8],
+    transform: TransformId,
+    direction: Direction,
+) -> bool {
+    if input.len() != output.len() {
+        return false;
+    }
+    let d = distance(transform);
+    if d == 0 {
+        return false;
+    }
+    let words = input.len() / d;
+    let body = words * d;
+    input.iter().enumerate().all(|(i, &byte)| {
+        let expected = match (transform, direction) {
+            (TransformId::Delta1 | TransformId::Delta2 | TransformId::Delta4, Direction::Forward) => {
+                byte.wrapping_sub(if i >= d { input[i - d] } else { 0 })
+            }
+            (TransformId::Delta1 | TransformId::Delta2 | TransformId::Delta4, Direction::Inverse) => {
+                byte.wrapping_add(if i >= d { output[i - d] } else { 0 })
+            }
+            (TransformId::Shuffle2 | TransformId::Shuffle4, Direction::Forward) => {
+                if i >= body {
+                    byte
+                } else {
+                    input[(i % words) * d + i / words]
+                }
+            }
+            (TransformId::Shuffle2 | TransformId::Shuffle4, Direction::Inverse) => {
+                if i >= body {
+                    byte
+                } else {
+                    input[(i % d) * words + i / d]
+                }
+            }
+            _ => return false,
+        };
+        output[i] == expected
+    })
+}
+
+pub(super) fn forward(raw: &[u8], t: TransformId) -> Result<Vec<u8>, BatoError> {
     if t.is_deflate_container() {
         return Err(not_a_filter());
     }
@@ -92,7 +139,7 @@ pub(crate) fn forward(raw: &[u8], t: TransformId) -> Result<Vec<u8>, BatoError> 
     }
     Ok(out)
 }
-pub(crate) fn inverse(raw: &mut [u8], t: TransformId) -> Result<(), BatoError> {
+pub(super) fn inverse(raw: &mut [u8], t: TransformId) -> Result<(), BatoError> {
     if t.is_deflate_container() {
         return Err(not_a_filter());
     }
