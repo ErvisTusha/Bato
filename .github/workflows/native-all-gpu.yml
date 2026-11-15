@@ -5,6 +5,19 @@ name: Strict all-native Bato platform executable
 # this release workflow refuses to publish an executable missing either native
 # library. The output is ONE executable per requested OS/architecture.
 on:
+  push:
+    branches: [claude/focused-faraday-t2c712]
+    paths:
+      - 'src/**'
+      - 'native/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'scripts/build_native_backends.sh'
+      - 'scripts/build_native_backends.ps1'
+      - 'scripts/bato_tools/**'
+      - 'scripts/run_tests.py'
+      - '.github/workflows/native-all-gpu.yml'
   workflow_dispatch:
     inputs:
       platform:
@@ -24,7 +37,7 @@ concurrency:
 
 jobs:
   linux-native:
-    if: inputs.platform == 'linux-x64'
+    if: (github.event_name == 'push' && vars.BATO_ENABLE_NATIVE_RELEASE == 'true') || (github.event_name == 'workflow_dispatch' && inputs.platform == 'linux-x64')
     runs-on: [self-hosted, Linux, X64, bato-native-sdk]
     timeout-minutes: 90
     steps:
@@ -82,7 +95,7 @@ jobs:
           if-no-files-found: error
 
   windows-native:
-    if: inputs.platform == 'windows-x64'
+    if: (github.event_name == 'push' && vars.BATO_ENABLE_NATIVE_RELEASE == 'true') || (github.event_name == 'workflow_dispatch' && inputs.platform == 'windows-x64')
     runs-on: [self-hosted, Windows, X64, bato-native-sdk]
     timeout-minutes: 90
     steps:
