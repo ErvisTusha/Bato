@@ -103,6 +103,18 @@ fn main() {
     }
 
     println!(
+        "cargo:rustc-env=BATO_BUNDLED_NATIVE_BACKENDS={}",
+        if embedded.is_empty() {
+            "none".to_string()
+        } else {
+            embedded
+                .iter()
+                .map(|cfg| cfg.trim_start_matches("bato_embedded_"))
+                .collect::<Vec<_>>()
+                .join(",")
+        }
+    );
+    println!(
         "cargo:warning=Bato GPU bundle: {} native provider(s) embedded for {target_os}; \
          CUDA and wgpu remain linked by the selected features",
         embedded.len()
