@@ -5,7 +5,11 @@ use super::cm::{
     segment::{self, Chunk, Coding, Direction, Trials},
 };
 use super::memory::{HostBudget, MemoryLease};
-use super::{checksum::crc32c, gpu::cuda::filters::WorkerFilters, types::*};
+use super::{
+    checksum::crc32c,
+    gpu::filters::{FilterPool, WorkerFilters},
+    types::*,
+};
 use std::{
     collections::BTreeMap,
     sync::{mpsc, Arc, Mutex},
@@ -197,17 +201,15 @@ impl Pool {
         let incoming = Arc::new(Mutex::new(incoming));
         let (finished, results) = mpsc::channel::<JobResult>();
         let mut handles = Vec::with_capacity(admission.workers);
-        let cuda_slot = Arc::new(Mutex::new(false));
-        for _ in 0..admission.workers {
+        let accelerators = Arc::new(FilterPool::default());
+        for worker in 0..admission.workers {
             let incoming = incoming.clone();
             let finished = finished.clone();
             let options = options.clone();
-            let cuda_slot = cuda_slot.clone();
-            handles.push(
-                std::thread::Builder::new()
-                    .stack_size(STACK_MEMORY)
-                    .spawn(move || run_worker(&incoming, &finished, &options, &cuda_slot))?,
-            );
+            let accelerators = accelerators.clone();
+            handles.push(std::thread::Builder::new().stack_size(STACK_MEMORY).spawn(
+                move || run_worker(&incoming, &finished, &options, (&accelerators, worker)),
+            )?);
         }
         Ok(Self {
             jobs: Some(jobs),
@@ -287,9 +289,10 @@ fn run_worker(
     incoming: &Mutex<mpsc::Receiver<Job>>,
     finished: &mpsc::Sender<JobResult>,
     options: &ExecutionOptions,
-    cuda_slot: &Mutex<bool>,
+    (accelerators, worker): (&FilterPool, usize),
 ) {
-    let mut accelerator = WorkerFilters::new(options.compute, cuda_slot, &options.stats);
+    let mut accelerator =
+        WorkerFilters::new(accelerators, (options.compute, &options.stats), worker);
     loop {
         let Ok((id, work, lease)) = incoming.lock().unwrap().recv() else {
             return;

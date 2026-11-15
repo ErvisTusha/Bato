@@ -3,7 +3,7 @@
 //! XZ delta filter; original implementations, always selected by byte cost.
 use super::x86::{self, Sites};
 use crate::core::{
-    gpu::cuda::filters::{Direction, WorkerFilters},
+    gpu::filters::{Direction, WorkerFilters},
     memory::try_filled,
     types::{BatoError, TransformId},
 };
@@ -124,6 +124,90 @@ pub(super) fn inverse(raw: &mut [u8], t: TransformId) -> Result<(), BatoError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wgpu_filters_match_cpu_at_word_tile_and_tail_boundaries() {
+        use super::super::{
+            descriptor::Descriptor,
+            profile::Timing,
+            segment::{self, Trials},
+        };
+        use crate::core::{
+            gpu::filters::FilterPool,
+            types::{BlockType, Compute, ExecutionStats},
+        };
+
+        let Some(pool) = FilterPool::wgpu_for_test() else {
+            assert!(
+                std::env::var_os("BATO_TEST_REQUIRE_WGPU").is_none(),
+                "no wgpu test adapter"
+            );
+            eprintln!("wgpu filter parity skipped: no adapter");
+            return;
+        };
+        let stats = ExecutionStats::default();
+        let mut worker = WorkerFilters::new(&pool, (Compute::Wgpu, &stats), 0);
+        for length in [1, 3, 4, 63, 64, 65, 4095, 4096, 4097, 65539] {
+            let input: Vec<_> = (0..length)
+                .map(|i: u32| ((i.wrapping_mul(0x9e3779b1) >> 21) ^ (i >> 3)) as u8)
+                .collect();
+            for transform in CANDIDATES {
+                let expected = forward(&input, transform).unwrap();
+                let transformed = worker
+                    .run(&input, transform, Direction::Forward)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(transformed, expected, "{transform:?} ({length} bytes)");
+                let restored = worker
+                    .run(&transformed, transform, Direction::Inverse)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(restored, input, "{transform:?} ({length} bytes)");
+            }
+        }
+        let descriptor = Descriptor {
+            segment_log2: 16,
+            chunk_log2: 14,
+            table_log2: 16,
+        };
+        let raw: Vec<u8> = (1..=65_535u32).map(|byte| byte as u8).collect();
+        let encode = |worker| {
+            segment::encode_segment(
+                &mut raw.clone(),
+                (descriptor, Trials::Sequential),
+                Timing::off(),
+                worker,
+            )
+            .unwrap()
+        };
+        let (cpu_chunks, cpu_coding) = encode(None);
+        let (wgpu_chunks, wgpu_coding) = encode(Some(&mut worker));
+        assert_eq!(cpu_coding, wgpu_coding);
+        assert_eq!(cpu_chunks.len(), 1);
+        assert_eq!(wgpu_chunks.len(), 1);
+        let cpu = &cpu_chunks[0];
+        let accelerated = &wgpu_chunks[0];
+        assert_eq!(accelerated.kind, BlockType::Repeat);
+        assert_eq!(
+            (cpu.kind, cpu.length, cpu.crc, &cpu.payload),
+            (
+                accelerated.kind,
+                accelerated.length,
+                accelerated.crc,
+                &accelerated.payload
+            )
+        );
+        let restored = segment::decode_segment(
+            &wgpu_chunks,
+            (descriptor, raw.len()),
+            wgpu_coding,
+            Timing::off(),
+            Some(&mut worker),
+        )
+        .unwrap();
+        assert_eq!(restored, raw);
+        assert!(stats.snapshot().wgpu_filter_dispatches > 0);
+    }
 
     #[test]
     fn cuda_filters_match_cpu_at_word_tile_and_tail_boundaries() {

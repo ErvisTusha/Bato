@@ -70,6 +70,11 @@ impl Drop for Session {
 #[derive(Clone)]
 pub struct Cuda(Rc<Session>);
 
+pub(super) struct Adapter {
+    pub(super) ordinal: c_int,
+    pub(super) pci_bus_id: String,
+}
+
 /// A kernel of the loaded module.
 #[derive(Clone, Copy)]
 pub(super) struct Function(Handle);
@@ -84,14 +89,14 @@ pub(super) enum Argument {
 impl Cuda {
     /// Opens the first CUDA device and loads the kernels, or says why not.
     pub fn probe() -> Result<Self, GpuError> {
-        Self::open(driver::SCHED_SPIN)
+        Self::open(0, driver::SCHED_SPIN)
     }
 
-    pub(super) fn open_for_filters() -> Result<Self, GpuError> {
-        Self::open(driver::SCHED_BLOCKING_SYNC)
+    pub(super) fn open_for_filters(ordinal: c_int) -> Result<Self, GpuError> {
+        Self::open(ordinal, driver::SCHED_BLOCKING_SYNC)
     }
 
-    fn open(schedule: c_uint) -> Result<Self, GpuError> {
+    pub(super) fn adapters() -> Result<Vec<Adapter>, GpuError> {
         let driver = Driver::load()?;
         // SAFETY: `cuInit` takes only its flags.
         driver.check(unsafe { (driver.init)(0) }, "cuInit")?;
@@ -99,12 +104,49 @@ impl Cuda {
         // SAFETY: `count` is a valid place for the one value written.
         let status = unsafe { (driver.device_count)(&mut count) };
         driver.check(status, "cuDeviceGetCount")?;
-        if count < 1 {
+        let mut adapters = Vec::new();
+        for ordinal in 0..count {
+            let mut device: Device = 0;
+            // SAFETY: the ordinal is within the device count and the output is valid.
+            driver.check(
+                unsafe { (driver.device)(&mut device, ordinal) },
+                "cuDeviceGet",
+            )?;
+            let mut bus = [0 as c_char; NAME_BYTES];
+            // SAFETY: the buffer is one byte longer than the length passed to CUDA.
+            let status = unsafe {
+                (driver.device_pci_bus_id)(bus.as_mut_ptr(), (NAME_BYTES - 1) as c_int, device)
+            };
+            let pci_bus_id = if driver.check(status, "cuDeviceGetPCIBusId").is_ok() {
+                // SAFETY: the final byte is zero regardless of what the driver wrote.
+                unsafe { CStr::from_ptr(bus.as_ptr()) }
+                    .to_string_lossy()
+                    .into_owned()
+            } else {
+                // CUDA can still use the device. An unknown ID cannot deduplicate adapters.
+                String::new()
+            };
+            adapters.push(Adapter {
+                ordinal,
+                pci_bus_id,
+            });
+        }
+        if adapters.is_empty() {
             return Err(GpuError::Device("no CUDA device".into()));
         }
+        Ok(adapters)
+    }
+
+    fn open(ordinal: c_int, schedule: c_uint) -> Result<Self, GpuError> {
+        let driver = Driver::load()?;
+        // SAFETY: `cuInit` takes only its flags.
+        driver.check(unsafe { (driver.init)(0) }, "cuInit")?;
         let mut device: Device = 0;
-        // SAFETY: `device` is a valid place and ordinal 0 exists.
-        driver.check(unsafe { (driver.device)(&mut device, 0) }, "cuDeviceGet")?;
+        // SAFETY: `device` is valid; CUDA validates the ordinal.
+        driver.check(
+            unsafe { (driver.device)(&mut device, ordinal) },
+            "cuDeviceGet",
+        )?;
         let mut name = [0 as c_char; NAME_BYTES];
         // SAFETY: the driver writes at most the stated length; the last byte
         // is left out so the text always ends with a NUL.

@@ -5,7 +5,7 @@
 use super::{filters, huffman, lz, numbers, varint};
 use crate::core::{
     frame::block_cost,
-    gpu::cuda::filters::WorkerFilters,
+    gpu::filters::WorkerFilters,
     memory::try_copy,
     types::{BatoError, BlockType, TransformId},
 };

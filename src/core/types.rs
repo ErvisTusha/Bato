@@ -32,6 +32,7 @@ pub enum BatoError {
     AllocationFailed { bytes: usize },
     InvalidOptions(String),
     Cuda(String),
+    Wgpu(String),
     CorruptStream(String),
     UnknownBlockType(u8),
     UnknownTransformId(u8),
@@ -73,6 +74,7 @@ impl fmt::Display for BatoError {
             Self::AllocationFailed { bytes } => write!(f, "Unable to allocate {bytes} bytes"),
             Self::InvalidOptions(s) => write!(f, "Invalid options: {s}"),
             Self::Cuda(reason) => write!(f, "CUDA byte filters: {reason}"),
+            Self::Wgpu(reason) => write!(f, "wgpu byte filters: {reason}"),
             Self::CorruptStream(s) => write!(f, "Corrupted stream: {s}"),
             Self::UnknownBlockType(v) => write!(f, "Unknown block type: {v}"),
             Self::UnknownTransformId(v) => write!(f, "Unknown transform ID: {v}"),
@@ -111,6 +113,11 @@ pub struct ExecutionStatsSnapshot {
     pub cuda_filter_bytes: u64,
     pub cuda_device: String,
     pub cuda_fallback: String,
+    pub wgpu_filter_dispatches: u64,
+    pub wgpu_filter_bytes: u64,
+    /// Devices that successfully completed at least one archive filter.
+    pub gpu_devices: Vec<String>,
+    pub gpu_fallback: String,
     pub estimated_host_memory: usize,
     /// Startup allowance, shared by the entire operation.
     pub memory_budget: usize,
@@ -148,13 +155,15 @@ impl ExecutionStats {
 /// Where eligible byte filters run. Every setting produces identical archives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Compute {
-    /// Try CUDA on large batches and run on the CPU if unavailable or busy.
+    /// Try available CUDA and wgpu devices for large batches, with CPU fallback.
     Auto,
     /// Run all filters on the CPU.
     #[default]
     Cpu,
     /// Require CUDA for supported batches. A device failure is returned.
     Cuda,
+    /// Require a supported hardware adapter through wgpu for eligible filters.
+    Wgpu,
 }
 
 #[derive(Debug, Clone, Default)]

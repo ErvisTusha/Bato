@@ -90,13 +90,16 @@ fn filesystem_name_aliases_fail_before_publication_without_renaming_entries() {
         file(&mut catalogue, &format!("{second}/b"), b"b");
         catalogue.push(0);
         let encoded = wrap(&catalogue);
-        for force in [false, true] {
-            let destination = root.path().join(if force { "forced" } else { "output" });
+        for (name, overwrite) in [
+            ("output", Overwrite::Refuse),
+            ("forced", Overwrite::Replace),
+        ] {
+            let destination = root.path().join(name);
             assert!(extract_solid_archive_with_options(
                 &mut Cursor::new(&encoded),
                 &destination,
                 &DecodeLimits::default(),
-                force
+                overwrite
             )
             .is_err());
             assert!(!destination.exists(), "name aliases published output");

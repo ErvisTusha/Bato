@@ -84,21 +84,27 @@ By default, Bato utilizes all available CPU cores (`--threads 0`) and manages up
 - `--memory-budget <auto|BYTES>`: Set memory budget (e.g. `2G`, `512M`).
 - `--segment-size BYTES`: Set segment geometry (default: 64 MiB).
 - `--timing`: Display per-stage time and bit attribution breakdowns.
-- `--compute auto|cpu|cuda`: Enable or disable experimental CUDA byte filters.
-  CPU is the default. Auto uses CUDA on eligible segments from 8 to 64 MiB
-  when the NVIDIA device and transfer slot are available. CPU workers can work on other segments
-  concurrently. The context model, entropy coding and checksums run on CPU.
-  Supported CUDA batches are at most 64 MiB. The embedded CUDA kernels
-  require an NVIDIA driver and a GPU compatible with PTX targeting sm_75.
-- `--stats`: Report CPU blocks and successful CUDA filter dispatches. A zero
-  dispatch count means the operation did not run a CUDA filter. Use
-  `--compute cuda --stats` for controlled comparisons. CUDA device errors
-  are reported in explicit CUDA mode. Auto falls back to the CPU.
+- `--compute auto|cpu|cuda|wgpu` selects the experimental byte-filter backend.
+  CPU is the default. Auto tries GPU filters on 8–64 MiB segments and uses the
+  CPU when no device is available or a device is busy. Select `cuda` or `wgpu`
+  to test eligible filters explicitly and surface device errors.
+- CUDA uses the installed NVIDIA driver and the embedded `sm_75` PTX. wgpu
+  uses Vulkan on Linux, Direct3D 12 or Vulkan on Windows, and Metal on Apple platforms.
+  Auto can use multiple detected devices concurrently when archive workers
+  have independent segments. Matching CUDA and wgpu PCI IDs share one slot,
+  with CUDA preferred and wgpu available as a fallback. Ambiguous NVIDIA
+  adapters are considered for fallback after the CUDA devices are unavailable.
+- The device backends apply the existing delta and byte-shuffle transforms.
+  The context model, entropy coder and checksums run on the CPU. GPU filters
+  preserve the archive format and are designed to produce the same bytes.
+- `--stats` reports successful CUDA and wgpu launches, processed filter bytes,
+  and the devices that completed work. Zero launches indicate CPU processing
+  for that phase.
 
 Compare both paths after a release build with
 `python3 scripts/benchmark_bato_table.py --branch-bin target/release/bato`.
-An asterisk marks a phase that used CUDA in every measured trial. Use
-`--show-usage` to print average CPU use and CUDA launch counts.
+An asterisk marks a phase that used its GPU backend in every measured trial.
+Use `--show-usage` to print average CPU use and GPU launch counts.
 
 ---
 

@@ -4,12 +4,14 @@
 //! compute model as implemented by the `wgpu` crate (MIT OR Apache-2.0), or,
 //! for NVIDIA, through the CUDA Driver API in `cuda`.
 //!
-//! The archive codec can use CUDA for delta and byte-shuffle filters. The
-//! matrix-vector and stream kernels are used for standalone measurements.
+//! The archive codec uses CUDA or wgpu for delta and byte-shuffle filters.
+//! The matrix-vector and stream kernels are used for standalone measurements.
 
 pub mod cuda;
+pub(crate) mod filters;
 pub mod matvec;
 pub mod streams;
+mod wgpu_filters;
 
 use std::fmt;
 use wgpu::util::DeviceExt;
@@ -22,7 +24,7 @@ const WORD: usize = 4;
 /// Why the GPU could not be used; the caller then runs on the CPU alone.
 #[derive(Debug)]
 pub enum GpuError {
-    /// No Vulkan compute adapter is installed or visible.
+    /// No compute adapter is installed or visible.
     NoAdapter,
     /// The adapter refused to open a device or to build a kernel.
     Device(String),
@@ -35,7 +37,7 @@ pub enum GpuError {
 impl fmt::Display for GpuError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NoAdapter => write!(f, "no Vulkan compute adapter"),
+            Self::NoAdapter => write!(f, "no compatible wgpu compute adapter"),
             Self::Device(reason) => write!(f, "GPU device unavailable: {reason}"),
             Self::Shape(reason) => write!(f, "invalid GPU kernel geometry: {reason}"),
             Self::Execution(reason) => write!(f, "GPU kernel failed: {reason}"),
@@ -80,10 +82,45 @@ fn words(values: impl IntoIterator<Item = u32>) -> Vec<u8> {
 impl Gpu {
     /// Opens the preferred adapter, or says why none can be used.
     pub fn probe() -> Result<Self, GpuError> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let mut adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::VULKAN));
+        let mut adapters = Self::adapters();
         adapters.sort_by_key(|adapter| rank(&adapter.get_info()));
         let adapter = adapters.into_iter().next().ok_or(GpuError::NoAdapter)?;
+        Self::open_adapter(&adapter)
+    }
+
+    fn adapters() -> Vec<wgpu::Adapter> {
+        // Enumerate one graphics API per OS so the same device is not
+        // scheduled twice through two wgpu backends.
+        let backends = if cfg!(target_vendor = "apple") {
+            wgpu::Backends::METAL
+        } else if cfg!(windows) {
+            wgpu::Backends::DX12
+        } else {
+            wgpu::Backends::VULKAN
+        };
+        let enumerate = |backends| {
+            let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+            descriptor.backends = backends;
+            let instance = wgpu::Instance::new(descriptor);
+            pollster::block_on(instance.enumerate_adapters(backends))
+        };
+        let adapters = enumerate(backends);
+        if cfg!(windows) && !adapters.iter().any(Self::hardware_adapter) {
+            return enumerate(wgpu::Backends::VULKAN);
+        }
+        adapters
+    }
+
+    fn hardware_adapter(adapter: &wgpu::Adapter) -> bool {
+        matches!(
+            adapter.get_info().device_type,
+            wgpu::DeviceType::DiscreteGpu
+                | wgpu::DeviceType::IntegratedGpu
+                | wgpu::DeviceType::VirtualGpu
+        )
+    }
+
+    fn open_adapter(adapter: &wgpu::Adapter) -> Result<Self, GpuError> {
         let info = adapter.get_info();
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))

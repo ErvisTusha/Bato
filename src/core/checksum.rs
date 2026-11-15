@@ -92,7 +92,7 @@ fn state(c: u32, d: &[u8]) -> u32 {
         return unsafe { hw(c, d) };
     }
     #[cfg(target_arch = "aarch64")]
-    if std::is_aarch64_feature_detected!("crc") {
+    if std::arch::is_aarch64_feature_detected!("crc") {
         // SAFETY: the CRC extension was detected at runtime; `hw` only reads `d`.
         return unsafe { hw(c, d) };
     }

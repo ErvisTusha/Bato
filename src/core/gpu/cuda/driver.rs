@@ -62,6 +62,7 @@ driver! {
     device_count = "cuDeviceGetCount": fn(*mut c_int);
     device = "cuDeviceGet": fn(*mut Device, c_int);
     device_name = "cuDeviceGetName": fn(*mut c_char, c_int, Device);
+    device_pci_bus_id = "cuDeviceGetPCIBusId": fn(*mut c_char, c_int, Device);
     device_memory = "cuDeviceTotalMem_v2": fn(*mut usize, Device);
     set_context_flags = "cuDevicePrimaryCtxSetFlags_v2": fn(Device, c_uint);
     retain_context = "cuDevicePrimaryCtxRetain": fn(*mut Handle, Device);

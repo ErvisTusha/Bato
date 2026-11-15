@@ -14,7 +14,7 @@ use super::{
 };
 use crate::core::{
     checksum::crc32c,
-    gpu::cuda::filters::WorkerFilters,
+    gpu::filters::WorkerFilters,
     memory::{try_capacity, try_copy},
     types::{BatoError, BlockType, Primer, TransformId, DEFLATE_EXPANSION},
 };

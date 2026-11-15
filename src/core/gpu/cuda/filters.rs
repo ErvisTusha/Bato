@@ -1,24 +1,14 @@
 //! CUDA implementations of the format's delta and byte-plane filters.
 //! Provenance: original implementation of the byte operations in cm/filters.rs,
 //! using parallel prefix sums for delta inversion.
-use super::{Argument, Cuda, GpuError, Memory};
-use crate::core::{
-    memory::try_filled,
-    types::{BatoError, Compute, ExecutionStats, TransformId},
+use super::{
+    super::filters::{Direction, MAX_BYTES},
+    Argument, Cuda, GpuError, Memory,
 };
-use std::sync::{Mutex, TryLockError};
+use crate::core::types::TransformId;
 
 /// Bytes processed by a workgroup of the inverse delta kernel.
 const DELTA_TILE_BYTES: usize = 4096;
-/// Cap the device working set at two 64 MiB buffers plus tile carries.
-pub(crate) const MAX_BYTES: usize = 64 * 1024 * 1024;
-
-#[derive(Clone, Copy)]
-pub(crate) enum Direction {
-    Forward,
-    Inverse,
-}
-
 /// Dispatches the selected filter and downloads the exact output bytes.
 pub(crate) fn apply(
     cuda: &Cuda,
@@ -102,103 +92,4 @@ fn inverse_delta(
     )?;
     result.read(output)?;
     Ok(3)
-}
-
-/// CUDA driver startup and host transfers need a complete large batch to amortize.
-const AUTO_MIN_BYTES: usize = 8 * 1024 * 1024;
-
-/// Worker-local CUDA session. The pool shares a single bounded transfer slot
-/// so other workers can continue on the CPU while one uses the device.
-pub(crate) struct WorkerFilters<'a> {
-    compute: Compute,
-    slot: &'a Mutex<bool>,
-    stats: &'a ExecutionStats,
-    cuda: Option<Cuda>,
-}
-
-impl<'a> WorkerFilters<'a> {
-    pub(crate) fn new(compute: Compute, slot: &'a Mutex<bool>, stats: &'a ExecutionStats) -> Self {
-        Self {
-            compute,
-            slot,
-            stats,
-            cuda: None,
-        }
-    }
-
-    /// Attempts a CUDA byte filter. Returning no output leaves the input
-    /// unchanged so the caller can run the CPU reference.
-    pub(crate) fn run(
-        &mut self,
-        input: &[u8],
-        transform: TransformId,
-        direction: Direction,
-    ) -> Result<Option<Vec<u8>>, BatoError> {
-        let min_bytes = match self.compute {
-            Compute::Cpu => return Ok(None),
-            Compute::Auto => AUTO_MIN_BYTES,
-            Compute::Cuda => 1,
-        };
-        if !(min_bytes..=MAX_BYTES).contains(&input.len()) {
-            return Ok(None);
-        }
-        let mut unavailable = match self.compute {
-            Compute::Auto => match self.slot.try_lock() {
-                Err(TryLockError::WouldBlock) => return Ok(None),
-                result => result.map_err(|_| BatoError::Cuda("transfer slot poisoned".into()))?,
-            },
-            _ => self
-                .slot
-                .lock()
-                .map_err(|_| BatoError::Cuda("transfer slot poisoned".into()))?,
-        };
-        if *unavailable {
-            return Ok(None);
-        }
-        let mut output = match try_filled(input.len(), 0u8) {
-            Ok(output) => output,
-            Err(error) if self.compute == Compute::Auto => {
-                self.stats
-                    .update(|stats| stats.cuda_fallback = error.to_string());
-                return Ok(None);
-            }
-            Err(error) => return Err(error),
-        };
-        let result = self.apply(input, &mut output, (transform, direction));
-        match result {
-            Ok(dispatches) => {
-                self.stats.update(|stats| {
-                    stats.cuda_filter_dispatches += dispatches;
-                    stats.cuda_filter_bytes += input.len() as u64;
-                });
-                Ok(Some(output))
-            }
-            Err(error) if self.compute == Compute::Auto => {
-                *unavailable = true;
-                self.stats
-                    .update(|stats| stats.cuda_fallback = error.to_string());
-                Ok(None)
-            }
-            Err(error) => Err(BatoError::Cuda(error.to_string())),
-        }
-    }
-
-    fn apply(
-        &mut self,
-        input: &[u8],
-        output: &mut [u8],
-        operation: (TransformId, Direction),
-    ) -> Result<u64, GpuError> {
-        if self.cuda.is_none() {
-            let cuda = Cuda::open_for_filters()?;
-            self.stats
-                .update(|stats| stats.cuda_device = cuda.description());
-            self.cuda = Some(cuda);
-        }
-        let cuda = self
-            .cuda
-            .as_ref()
-            .ok_or_else(|| GpuError::Execution("CUDA session unavailable".into()))?;
-        apply(cuda, input, output, operation)
-    }
 }
