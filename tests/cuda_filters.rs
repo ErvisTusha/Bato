@@ -1,3 +1,5 @@
+#![cfg(feature = "gpu")]
+
 use bato_engine::{
     compress_with_options, decompress_with_options, read_stream_layout, BlockType,
     CompressionOptions, Compute, DecompressionOptions, ExecutionOptions, TransformId,
