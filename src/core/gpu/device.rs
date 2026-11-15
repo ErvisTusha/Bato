@@ -1,16 +1,9 @@
 //! GPU device discovery, PCI-identity de-duplication and device admission.
 //! Provenance: original Bato GPU scheduling, extracted without changing behavior.
 
-use super::{
-    cuda::Cuda,
-    wgpu_backend::WgpuFilters,
-    Gpu, GpuError, NVIDIA_VENDOR,
-};
+use super::{cuda::Cuda, wgpu_backend::WgpuFilters, Gpu, GpuError, NVIDIA_VENDOR};
 use crate::core::types::Compute;
-use std::sync::{
-    atomic::AtomicUsize,
-    Mutex, MutexGuard, OnceLock, TryLockError,
-};
+use std::sync::{atomic::AtomicUsize, Mutex, MutexGuard, OnceLock, TryLockError};
 
 #[derive(Default)]
 pub(super) struct DeviceState {
