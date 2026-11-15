@@ -33,7 +33,7 @@ fn temporary_name(prefix: &str, attempt: u32) -> OsString {
 }
 pub struct AtomicOutput {
     dir: Directory,
-    file: File,
+    file: Option<File>,
     temporary: OsString,
     name: OsString,
     overwrite: Overwrite,
@@ -70,7 +70,7 @@ impl AtomicOutput {
                 Ok(file) => {
                     return Ok(Self {
                         dir,
-                        file,
+                        file: Some(file),
                         temporary,
                         name,
                         overwrite,
@@ -87,12 +87,17 @@ impl AtomicOutput {
         ))
     }
     pub fn writer(&self) -> io::Result<File> {
-        self.file.try_clone()
+        self.file.as_ref().expect("staging output file already published").try_clone()
     }
     pub fn temporary_path(&self) -> PathBuf {
         self.dir.path.join(&self.temporary)
     }
     pub fn publish(mut self) -> io::Result<()> {
+        // Windows does not permit renaming or unlinking the staged file while
+        // a handle to it is still open without delete sharing. All cloned
+        // writers must already have been flushed and dropped by the caller.
+        #[cfg(windows)]
+        drop(self.file.take());
         self.dir
             .publish_file(&self.dir, &self.temporary, &self.name, self.overwrite)?;
         self.published = true;
@@ -106,7 +111,7 @@ impl Drop for AtomicOutput {
             {
                 if let (Ok(a), Ok(b)) = (
                     rfs::statat(self.dir.file(), &self.temporary, AtFlags::SYMLINK_NOFOLLOW),
-                    rfs::fstat(&self.file),
+                    rfs::fstat(self.file.as_ref().expect("unpublished staging handle")),
                 ) {
                     if a.st_dev == b.st_dev && a.st_ino == b.st_ino {
                         // Best-effort cleanup: Drop cannot report errors, and a
