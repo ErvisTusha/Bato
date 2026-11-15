@@ -31,13 +31,25 @@ It operates under one strict, non-negotiable policy: **compressed size > decompr
 Requires a recent Rust toolchain (Rust 1.89+).
 
 ```bash
-cargo build --release --locked                           # Existing GPU-capable build
-cargo build --release --locked --no-default-features     # Pure CPU build, no GPU dependencies
+cargo build --release --locked                           # All GPU backends + CPU, auto GPU selection
+cargo build --release --locked --no-default-features     # CPU-only diagnostic build
 ```
 
-CUDA and wgpu are independently enabled Cargo features, both selected by
-default. The legacy `gpu` feature remains as an alias for both. For a
-single-backend or CPU-only build, use `--no-default-features`:
+**The default executable enables CUDA, HIP, Level Zero, direct Metal, wgpu
+and CPU**. `--compute auto` is also the default: the scheduler discovers
+available devices and uses CPU fallback for unsupported, small or busy
+workloads. Users do **not** select a hardware-specific Bato download.
+The `gpu` feature remains a backwards-compatible alias for CUDA + wgpu;
+individual features are developer/debug build options, not compression modes.
+
+`cargo build` includes the native plugin *loaders*. To bundle vendor-specific
+HIP, Level Zero or Metal libraries into one executable, build those libraries
+with their SDKs and supply them through `BATO_BUNDLE_*_LIBRARY` at compile
+time. The portable CUDA and wgpu backends need no separate library download.
+See [single-file GPU packaging](native/README.md).
+
+For a diagnostic single-backend or CPU-only build, use
+`--no-default-features`:
 
 ```bash
 cargo build --release --locked --no-default-features --features cuda
@@ -53,7 +65,14 @@ These feature selections do not change the archive format. Missing explicit
 backends report errors rather than silently claiming GPU execution.
 
 
-The compiled binary will be placed at `target/release/bato`.
+The compiled executable will be placed at `target/release/bato`
+(`target/release/bato.exe` on Windows). GitHub Actions also provides
+universal executables for Linux x64/ARM64, Windows x64 and macOS x64/ARM64
+in [the universal-binaries workflow](.github/workflows/universal-binaries.yml).
+Each artifact contains **one executable per OS/architecture**, not one per GPU.
+The macOS builds include the direct Metal library; AMD and Intel are always
+supported through the wgpu fallback on compatible driver stacks, even when
+their native SDK plugins were not built by the release runner.
 
 ---
 
@@ -104,9 +123,10 @@ By default, Bato utilizes all available CPU cores (`--threads 0`) and manages up
 - `--segment-size BYTES`: Set segment geometry (default: 64 MiB).
 - `--timing`: Display per-stage time and bit attribution breakdowns.
 - `--compute auto|cpu|cuda|hip|level-zero|metal|wgpu` selects the experimental byte-filter backend.
-  CPU is the default. Auto tries GPU filters on 8–64 MiB segments and uses the
-  CPU when no device is available or a device is busy. Select `cuda` or `wgpu`
-  to test eligible filters explicitly and surface device errors.
+  **Auto is the default.** Auto considers CUDA, HIP, Intel Level Zero, direct
+  Metal and wgpu where available, on eligible 8–64 MiB segments. CPU workers
+  remain active for coding and as a fallback. Explicit backend selection is
+  intended for hardware parity tests and debugging.
 - CUDA uses the installed NVIDIA driver and the embedded `sm_75` PTX. wgpu
   uses Vulkan on Linux, Direct3D 12 or Vulkan on Windows, and Metal on Apple platforms.
   Auto can use multiple detected devices concurrently when archive workers
