@@ -1,0 +1,93 @@
+name: Universal Bato executables (one per OS and CPU architecture)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [claude/focused-faraday-t2c712]
+    paths:
+      - 'src/**'
+      - 'native/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'scripts/build_native_backends.sh'
+      - '.github/workflows/universal-binaries.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  universal:
+    name: ${{ matrix.artifact }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            artifact: bato-linux-x64
+            executable: bato
+            metal: false
+          - os: ubuntu-24.04-arm
+            artifact: bato-linux-arm64
+            executable: bato
+            metal: false
+          - os: windows-2025
+            artifact: bato-windows-x64
+            executable: bato.exe
+            metal: false
+          - os: macos-15
+            artifact: bato-macos-arm64
+            executable: bato
+            metal: true
+          - os: macos-15-intel
+            artifact: bato-macos-x64
+            executable: bato
+            metal: true
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Verify format and enabled default backend feature set
+        shell: bash
+        run: |
+          cargo fmt --all -- --check
+          python3 scripts/check_universal_features.py
+      - name: Build the native Metal plugin for embedding (macOS)
+        if: matrix.metal
+        shell: bash
+        run: bash scripts/build_native_backends.sh metal
+      - name: Build universal executable (all compiled backend features)
+        if: '!matrix.metal'
+        run: cargo build --release --locked --bin bato
+      - name: Embed direct native Metal in universal executable (macOS)
+        if: matrix.metal
+        shell: bash
+        env:
+          BATO_BUNDLE_METAL_LIBRARY: ${{ github.workspace }}/target/native/libbato_metal.dylib
+          BATO_REQUIRE_BUNDLED_NATIVE: '1'
+        run: cargo build --release --locked --bin bato
+      - name: Verify executable boots and advertises every compute mode
+        shell: bash
+        run: |
+          set -euo pipefail
+          "./target/release/${{ matrix.executable }}" --help > bato-help.txt 2>&1
+          grep -F -- '--compute auto|cpu|cuda|hip|level-zero|metal|wgpu' bato-help.txt
+      - name: Validate lossless archive round trip
+        shell: bash
+        run: |
+          python3 scripts/run_tests.py --bato-bin "target/release/${{ matrix.executable }}" --timeout 180
+      - name: Upload ONE executable for this OS/architecture (not per GPU)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: target/release/${{ matrix.executable }}
+          if-no-files-found: error
+
+  # GitHub-hosted runners do not include ROCm HIP or Intel oneAPI SDKs.
+  # These official portable builds still accelerate AMD and Intel hardware
+  # through wgpu (Vulkan/D3D12/Metal). Dedicated native HIP/Level Zero can be
+  # embedded by SDK-equipped release builders using BATO_BUNDLE_*_LIBRARY.
