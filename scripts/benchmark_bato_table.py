@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Compare two Bato revisions and print a table after each verified workload.
 
-Use the local release build for the branch when available and mark actual
-CUDA and wgpu filter dispatches by phase.
+Use the local universal release build for the branch when available and
+report actual CUDA, native HIP/Level Zero/Metal and wgpu filter dispatches.
 """
 import argparse
 import contextlib
@@ -11,6 +11,7 @@ import io
 import json
 import os
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -33,7 +34,7 @@ MAX_DIR = 50_000_000
 MAX_FILE = 5_000_000
 TABLE_COLUMNS = (
     ('Input', 35), ('Original KB', 15), ('Main CPU', 33), ('Branch CPU', 33),
-    ('Branch wgpu', 33), ('Branch CUDA', 36), ('Elapsed', 11),
+    ('Branch auto (all GPU + CPU)', 37), ('Elapsed', 11),
 )
 TABLE_WIDTH = sum(width for _, width in TABLE_COLUMNS) + len(TABLE_COLUMNS) - 1
 
@@ -171,9 +172,9 @@ def run_case(workload, name, build, output, args, resources):
         command.extend(['--bato-segment-size', str(args.bato_segment_size)])
     if args.bato_chunk_size is not None:
         command.extend(['--bato-chunk-size', str(args.bato_chunk_size)])
-    if name in ('cuda', 'wgpu'):
-        command.extend(['--bato-compute', name])
-    elif build.get('cuda_filters') or build.get('wgpu_filters'):
+    if name == 'auto':
+        command.extend(['--bato-compute', 'auto'])
+    elif build.get('gpu_compute_modes'):
         command.extend(['--bato-compute', 'cpu'])
     rows = []
     diagnostics = io.StringIO()
@@ -187,10 +188,12 @@ def run_case(workload, name, build, output, args, resources):
     row = rows[0]
     if status and row['status'] not in FAILURES:
         return {'status': 'FAIL', 'error': diagnostics.getvalue().strip() or f'benchmark exited {status}'}
-    if name in ('cuda', 'wgpu') and row['verified_lossless']:
-        row[f'{name}_phases'] = ''.join(
+    if name == 'auto' and row['verified_lossless']:
+        row['auto_phases'] = ''.join(
             phase if row.get(f'{prefix}_execution_stats') and all(
-                (stats or {}).get(f'{name}_filter_dispatches', 0)
+                sum((stats or {}).get(key, 0) for key in (
+                    'cuda_filter_dispatches', 'wgpu_filter_dispatches',
+                    'native_filter_dispatches')) > 0
                 for stats in row[f'{prefix}_execution_stats']
             ) else '-'
             for phase, prefix in [('E', 'comp'), ('D', 'decomp')]
@@ -201,8 +204,10 @@ def run_case(workload, name, build, output, args, resources):
 def build_capabilities(build):
     help_result = subprocess.run([build['binary'], '--help'], capture_output=True, text=True, check=True)
     help_text = help_result.stdout + help_result.stderr
-    return {**build, 'cuda_filters': '--compute auto|cpu|cuda' in help_text,
-            'wgpu_filters': '--compute auto|cpu|cuda|wgpu' in help_text}
+    found = re.search(r'--compute\\s+([a-z0-9|\\-]+)', help_text)
+    modes = set(found.group(1).split('|')) if found else set()
+    return {**build, 'gpu_compute_modes': sorted(modes),
+            'cuda_filters': 'cuda' in modes, 'wgpu_filters': 'wgpu' in modes}
 
 
 def table_line(values):
@@ -215,7 +220,7 @@ def table_line(values):
 def print_table_header():
     print('\nSizes are in decimal KB (1 KB = 1,000 bytes); times are compression/decompression seconds (medians).')
     print('Elapsed = time spent on this input across variants, including warmups and verification.')
-    print('* marks a phase that used its GPU backend in every measured trial.')
+    print('* marks a phase with at least one GPU dispatch in every measured trial.')
     print(table_line([name for name, _ in TABLE_COLUMNS]))
     print('-' * TABLE_WIDTH, flush=True)
 
@@ -228,7 +233,7 @@ def print_table_row(workload, rows, *, elapsed=None, refresh=False, final=True):
     def cell(row):
         if row.get('status') != 'PASS & VERIFIED':
             return row.get('status', 'FAIL')
-        phases = row.get('cuda_phases', row.get('wgpu_phases', ''))
+        phases = row.get('auto_phases', '')
         comp_mark = '*' if 'E' in phases else ''
         dec_mark = '*' if 'D' in phases else ''
         comp = f'{row["comp_time_s"]:.2f}'.replace('.', ',')
@@ -241,7 +246,7 @@ def print_table_row(workload, rows, *, elapsed=None, refresh=False, final=True):
     prefix = '\r\033[2K' if refresh else ''
     line = table_line([
         label, f'{workload["snapshot"]["size"] / 1000:,.2f}',
-        *(cell(rows[key]) for key in ('main CPU', 'branch CPU', 'branch wgpu', 'branch CUDA')),
+        *(cell(rows[key]) for key in ('main CPU', 'branch CPU', 'branch auto')),
         format_duration(elapsed) if elapsed is not None else '-',
     ])
     print(prefix + line, end='\n' if final or not refresh else '', flush=True)
@@ -255,13 +260,16 @@ def format_usage(row, phase):
     if wall > 0 and all(seconds is not None for seconds in child_cpu_times):
         cpu = f'{sum(child_cpu_times) / wall:.2f} logical CPUs on average'
     backend = row['effective_settings']['compute']
-    if backend not in ('cuda', 'wgpu'):
-        return f'CPU {cpu}, GPU launches 0'
-    dispatches = [(trial.get(f'{phase}_execution_stats') or {}).get(f'{backend}_filter_dispatches')
-                  for trial in trials]
-    launches = (str(sum(dispatches)) if dispatches and all(count is not None for count in dispatches)
-                else 'unknown')
-    return f'CPU {cpu}, {backend} launches {launches}'
+    keys = ('cuda_filter_dispatches', 'wgpu_filter_dispatches',
+            'native_filter_dispatches')
+    dispatches = []
+    for trial in trials:
+        stats = trial.get(f'{phase}_execution_stats') or {}
+        dispatches.append({key: stats.get(key, 0) for key in keys})
+    total = sum(sum(stats.values()) for stats in dispatches)
+    devices = sorted({device for trial in trials
+                      for device in (trial.get(f'{phase}_execution_stats') or {}).get('gpu_devices', [])})
+    return f'CPU {cpu}, {backend} GPU launches {total}, devices {devices}'
 
 
 def main():
@@ -323,16 +331,11 @@ def run_table(args, output):
     else:
         branch = build_revision(args.branch_revision or BRANCH, args.output)
     builds = {'main': main, 'branch': build_capabilities(branch)}
-    cuda = builds['branch']['cuda_filters']
-    wgpu = builds['branch'].get('wgpu_filters', False)
-    cuda_status = 'supported' if cuda else 'unsupported'
-    print(f'Branch CUDA filters: {cuda_status}', flush=True)
-    print(f"Branch wgpu filters: {'supported' if wgpu else 'unsupported'}", flush=True)
+    modes = builds['branch']['gpu_compute_modes']
+    print(f'Branch compute modes: {", ".join(modes) if modes else "legacy CPU-only"}', flush=True)
     variants = [('main CPU', 'main', builds['main']), ('branch CPU', 'branch', builds['branch'])]
-    if wgpu:
-        variants.append(('branch wgpu', 'wgpu', builds['branch']))
-    if cuda:
-        variants.append(('branch CUDA', 'cuda', builds['branch']))
+    if 'auto' in modes:
+        variants.append(('branch auto', 'auto', builds['branch']))
     memory = resolve_memory_budget()
     resources = {'cpus': min(available_cpu_count(), 256), 'memory': memory,
                  'managed': max(1, min(memory, memory_state()['available_ram_bytes']) * 9 // 10)}
@@ -351,10 +354,8 @@ def run_table(args, output):
         rows = {
             'main CPU': {'status': 'PENDING'},
             'branch CPU': {'status': 'PENDING'},
-            'branch wgpu': {'status': 'PENDING'} if wgpu else {
-                'status': 'UNSUPPORTED', 'error': 'Selected branch binary has no wgpu archive filters'},
-            'branch CUDA': {'status': 'PENDING'} if cuda else {
-                'status': 'UNSUPPORTED', 'error': 'Selected branch binary has no CUDA archive filters'},
+            'branch auto': {'status': 'PENDING'} if 'auto' in modes else {
+                'status': 'UNSUPPORTED', 'error': 'Selected branch binary has no auto compute option'},
         }
         print_table_row(workload, rows, refresh=refresh, final=False)
         for index, (label, name, build) in enumerate(variants, 1):
@@ -373,7 +374,7 @@ def run_table(args, output):
                     print(f'  {label} usage | compression: {comp} | decompression: {dec}', flush=True)
     for failure in failures:
         print(failure, file=sys.stderr)
-    return int(not (cuda or wgpu) or bool(failures))
+    return int('auto' not in modes or bool(failures))
 
 
 if __name__ == '__main__':
