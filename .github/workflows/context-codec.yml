@@ -32,7 +32,7 @@ jobs:
       - name: Validate Python tooling
         run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
       - name: Exercise the Bato release CLI
-        run: python3 scripts/run_tests.py --bato-bin target/release/bato
+        run: python3 scripts/run_tests.py --self-contained --bato-bin target/release/bato
 
   cpu-only:
     runs-on: ubuntu-latest
@@ -47,7 +47,7 @@ jobs:
       - run: cargo test --release --all-targets --no-default-features --locked
       - run: cargo build --release --no-default-features --locked
       - name: Verify CPU-only archive round trips
-        run: python3 scripts/run_tests.py --bato-bin target/release/bato --timeout 180
+        run: python3 scripts/run_tests.py --self-contained --bato-bin target/release/bato --timeout 180
 
   isolated-backends:
     runs-on: ubuntu-latest
