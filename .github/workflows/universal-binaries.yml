@@ -11,6 +11,9 @@ on:
       - 'Cargo.lock'
       - 'build.rs'
       - 'scripts/build_native_backends.sh'
+      - 'scripts/run_tests.py'
+      - 'scripts/check_universal_features.py'
+      - 'scripts/tests/**'
       - '.github/workflows/universal-binaries.yml'
 
 permissions:
