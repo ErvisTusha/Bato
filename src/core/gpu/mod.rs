@@ -10,6 +10,8 @@
 pub mod cuda;
 mod device;
 pub(crate) mod filters;
+#[cfg(any(feature = "hip", feature = "level-zero", feature = "metal"))]
+mod native;
 mod scheduler;
 pub mod matvec;
 pub mod streams;
