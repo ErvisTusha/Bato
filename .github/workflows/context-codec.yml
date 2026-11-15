@@ -41,6 +41,25 @@ jobs:
       - name: Verify CPU-only archive round trips
         run: python3 scripts/run_tests.py --bato-bin target/release/bato --timeout 180
 
+  isolated-backends:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [cuda, wgpu, hip, level-zero, metal]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Check standalone backend compile
+        run: cargo check --all-targets --locked --no-default-features --features ${{ matrix.backend }}
+      - name: Lint standalone backend
+        run: cargo clippy --all-targets --locked --no-default-features --features ${{ matrix.backend }} -- -D warnings
+      - name: Run standalone backend tests
+        run: cargo test --locked --no-default-features --features ${{ matrix.backend }}
+
   native-feature-check:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -50,11 +69,11 @@ jobs:
         with:
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check
-      - run: cargo check --locked --all-targets --features hip
-      - run: cargo check --locked --all-targets --features level-zero
-      - run: cargo check --locked --all-targets --features metal
-      - run: cargo clippy --release --all-targets --locked --features hip,level-zero,metal -- -D warnings
-      - run: cargo test --release --locked --features hip,level-zero,metal
+      - run: cargo check --locked --all-targets --no-default-features --features hip
+      - run: cargo check --locked --all-targets --no-default-features --features level-zero
+      - run: cargo check --locked --all-targets --no-default-features --features metal
+      - run: cargo clippy --release --all-targets --locked --no-default-features --features hip,level-zero,metal -- -D warnings
+      - run: cargo test --release --locked --no-default-features --features hip,level-zero,metal
       - name: Compile reference native ABI fixture (test-only)
         run: |
           mkdir -p target/native
@@ -63,7 +82,7 @@ jobs:
         env:
           BATO_TEST_NATIVE_PLUGIN: "1"
           BATO_HIP_LIBRARY: ${{ github.workspace }}/target/native/libbato_test_abi.so
-        run: cargo test --release --locked --features hip native_plugin_fixture_matches_cpu_filter_and_inverse -- --nocapture
+        run: cargo test --release --locked --no-default-features --features hip native_plugin_fixture_matches_cpu_filter_and_inverse -- --nocapture
       - name: Verify native plugin ABI can be compiled as C and C++
         run: |
           cc -x c -fsyntax-only native/include/bato_gpu_backend.h
@@ -77,7 +96,7 @@ jobs:
       - name: Build direct Metal plugin with Xcode
         run: bash scripts/build_native_backends.sh metal
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo check --locked --features metal
+      - run: cargo check --locked --no-default-features --features metal
 
   portable-paths:
     strategy:
