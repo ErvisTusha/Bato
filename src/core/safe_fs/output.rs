@@ -87,7 +87,10 @@ impl AtomicOutput {
         ))
     }
     pub fn writer(&self) -> io::Result<File> {
-        self.file.as_ref().expect("staging output file already published").try_clone()
+        self.file
+            .as_ref()
+            .expect("staging output file already published")
+            .try_clone()
     }
     pub fn temporary_path(&self) -> PathBuf {
         self.dir.path.join(&self.temporary)
