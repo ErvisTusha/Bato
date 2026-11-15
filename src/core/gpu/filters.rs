@@ -1,11 +1,8 @@
 //! GPU filter limits, operation direction, and the stable archive-facing API.
 //! Device discovery lives in `device.rs`; scheduling lives in `scheduler.rs`.
-//! Backend-specific kernels remain in `cuda/filters.rs` and `wgpu_filters.rs`.
+//! Backend-specific kernels remain in `cuda/filters.rs` and `wgpu_backend/filters.rs`.
 
-pub(crate) use super::{
-    device::FilterPool,
-    scheduler::WorkerFilters,
-};
+pub(crate) use super::{device::FilterPool, scheduler::WorkerFilters};
 
 /// Bound a single transfer and its temporary device buffers.
 pub(super) const MAX_BYTES: usize = 64 * 1024 * 1024;
