@@ -61,6 +61,7 @@ pub(super) fn inverse_on(
     inverse(raw, transform)
 }
 
+#[cfg(any(feature = "hip", feature = "level-zero", feature = "metal", test))]
 /// Validate GPU bytes directly against Bato's integer filter rules,
 /// without allocating another segment-sized CPU reference buffer.
 /// The inverse delta check is inductive: previous output bytes must already
@@ -317,6 +318,41 @@ mod tests {
                 let mut v = forward(&raw, t).unwrap();
                 inverse(&mut v, t).unwrap();
                 assert_eq!(v, raw);
+            }
+        }
+    }
+    #[test]
+    fn streaming_gpu_reference_matches_forward_and_inverse_filters() {
+        for length in [1, 2, 3, 4, 7, 65, 4095, 4096, 4097, 8193] {
+            let input = (0..length)
+                .map(|i| ((i * 117 + i / 7) & 255) as u8)
+                .collect::<Vec<_>>();
+            for transform in CANDIDATES {
+                let encoded = forward(&input, transform).unwrap();
+                assert!(matches_exact_filter(
+                    &input,
+                    &encoded,
+                    transform,
+                    Direction::Forward,
+                ));
+                let mut corrupted = encoded.clone();
+                let middle = corrupted.len() / 2;
+                corrupted[middle] ^= 1;
+                assert!(!matches_exact_filter(
+                    &input,
+                    &corrupted,
+                    transform,
+                    Direction::Forward,
+                ));
+                let mut restored = encoded.clone();
+                inverse(&mut restored, transform).unwrap();
+                assert_eq!(restored, input);
+                assert!(matches_exact_filter(
+                    &encoded,
+                    &restored,
+                    transform,
+                    Direction::Inverse,
+                ));
             }
         }
     }
