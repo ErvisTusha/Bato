@@ -153,7 +153,17 @@ By default, Bato utilizes all available CPU cores (`--threads 0`) and manages up
 Compare both paths after a release build with
 `python3 scripts/benchmark_bato_table.py --branch-bin target/release/bato`.
 An asterisk marks a phase that used its GPU backend in every measured trial.
-Use `--show-usage` to print average CPU use and GPU launch counts.
+Use `--show-usage` to print average CPU use and GPU launch counts,
+`--input PATH` (repeatable) to benchmark named files or directories instead of
+the random sample, and `--gpu-compute cuda` or `wgpu` to measure one backend
+in the third column instead of `auto`.
+
+Every result is stored in an SQLite database (`--database`, default
+`~/data-research/bato-table.sqlite3`). A verified result for the same binary
+bytes, input, compute mode, limits, geometry and hardware is reused rather
+than measured again, so an unchanged `main` runs once per input. Reused cells
+are prefixed with `=` and listed with their measurement date; `--refresh`
+measures everything again.
 
 ---
 
