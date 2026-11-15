@@ -85,6 +85,9 @@ pub(super) fn best(
     for filter in filters::CANDIDATES.into_iter().chain(x86) {
         let transformed = filters::forward_on(raw, filter, accelerator)?;
         best.evaluate(&transformed, filter)?;
+        if best.kind == BlockType::Repeat {
+            return Ok(best);
+        }
     }
     if let Some(coded) = numbers::encode(raw)? {
         best.consider(BlockType::Numeric, TransformId::None, coded);

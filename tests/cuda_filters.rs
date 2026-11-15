@@ -37,7 +37,11 @@ fn cuda_archive_matches_cpu_and_uses_gpu_in_both_directions() {
     assert!(layout.blocks.iter().any(|block| {
         block.transform_id == TransformId::Delta1 && block.block_type == BlockType::Repeat
     }));
-    assert!(gpu.execution.stats.snapshot().cuda_filter_dispatches > 0);
+    assert_eq!(
+        gpu.execution.stats.snapshot().cuda_filter_dispatches,
+        input.len().div_ceil(gpu.geometry.segment_size) as u64,
+        "the first filter reaches the minimum cost in each segment"
+    );
 
     let decode = DecompressionOptions {
         execution: ExecutionOptions {

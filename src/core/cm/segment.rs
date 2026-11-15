@@ -227,18 +227,23 @@ pub(crate) fn encode_segment(
     })?;
     let original_crc = crc32c(raw);
     let selected_filter = independent.transform;
+    let coding = plain(selected_filter);
+    let cost = independent.cost();
+    let chunks = vec![Chunk {
+        kind: independent.kind,
+        length: raw.len() as u32,
+        payload: independent.payload,
+        crc: original_crc,
+    }];
+    // Repeat uses one payload byte and no payload-length field. Even an
+    // empty coded payload needs that byte for its length. The deflate
+    // transform only expands the input and can only add framing cost.
+    if independent.kind == BlockType::Repeat {
+        return Ok((chunks, coding));
+    }
     // Keep complete framed costs throughout: a winning deflate transform is
     // not proof that the raw CM candidate (or the x86 candidate) is worse.
-    let mut winner = (
-        independent.cost(),
-        vec![Chunk {
-            kind: independent.kind,
-            length: raw.len() as u32,
-            payload: independent.payload,
-            crc: original_crc,
-        }],
-        plain(independent.transform),
-    );
+    let mut winner = (cost, chunks, coding);
     let minimum = |len: usize| -> usize {
         (0..len)
             .step_by(descriptor.chunk_bytes())
