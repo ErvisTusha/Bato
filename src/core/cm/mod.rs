@@ -11,7 +11,7 @@ mod context_map;
 mod deflate;
 pub(crate) mod descriptor;
 mod fast;
-mod filters;
+pub(crate) mod filters;
 mod hash;
 mod huffman;
 mod isse;
