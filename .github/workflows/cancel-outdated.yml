@@ -1,0 +1,79 @@
+name: Cancel outdated Bato Actions runs
+
+on:
+  push:
+    branches:
+      - main
+      - claude/focused-faraday-t2c712
+
+# Needed to cancel older GitHub Actions runs, not to change source files.
+permissions:
+  actions: write
+  contents: read
+
+# If pushes arrive rapidly, only the latest cancellation pass should run.
+concurrency:
+  group: bato-cancel-outdated-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cancel-outdated:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Cancel running and queued jobs from older commits on this branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          branch_ref="repos/${GITHUB_REPOSITORY}/git/ref/heads/${GITHUB_REF_NAME}"
+          current_sha="$(gh api "$branch_ref" --jq '.object.sha')"
+          if [[ "$current_sha" != "$GITHUB_SHA" ]]; then
+            echo "Newer push detected; this old cancellation job will not cancel anything."
+            exit 0
+          fi
+
+          # gh api --paginate applies --jq to each result page. The server
+          # filters by branch; the query retains queued, pending and running
+          # tasks, including jobs in OTHER workflow files on this branch.
+          active="$(gh api --method GET \
+            "repos/${GITHUB_REPOSITORY}/actions/runs" \
+            -f branch="$GITHUB_REF_NAME" -f per_page=100 --paginate \
+            --jq '.workflow_runs[]
+              | select(.status == "queued"
+                or .status == "in_progress"
+                or .status == "waiting"
+                or .status == "pending"
+                or .status == "requested")
+              | [.id, .head_sha, .status] | @tsv')"
+
+          cancelled=0
+          failed=0
+          while IFS=$'\t' read -r run_id run_sha run_status; do
+            [[ -n "$run_id" ]] || continue
+            if [[ "$run_sha" == "$GITHUB_SHA" ]]; then
+              echo "Keep current-commit run #$run_id ($run_status)."
+              continue
+            fi
+
+            # A newer push can supersede us while the API list is being read.
+            current_sha="$(gh api "$branch_ref" --jq '.object.sha')"
+            if [[ "$current_sha" != "$GITHUB_SHA" ]]; then
+              echo "Newer push arrived; stop this cancellation pass."
+              exit 0
+            fi
+
+            echo "Cancel outdated run #$run_id: $run_status, commit $run_sha"
+            if gh api --method POST \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/cancel" >/dev/null; then
+              cancelled=$((cancelled + 1))
+            else
+              # A job can complete between listing and cancellation.
+              echo "::warning::Unable to cancel run #$run_id (it may have finished)."
+              failed=$((failed + 1))
+            fi
+          done <<< "$active"
+
+          echo "Cancellation requests accepted: $cancelled; failed/raced: $failed"
