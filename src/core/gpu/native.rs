@@ -145,19 +145,9 @@ impl Plugin {
                 "{} GPU #{ordinal} filter returned error {result}", self.kind.label()
             )));
         }
-        // Until hardware-specific validation is complete, verify every byte
-        // against the canonical CPU implementation. Never trust an optional
-        // plugin to silently change archive bytes or checksum semantics.
-        let reference = match direction {
-            Direction::Forward => filters::forward(input, transform),
-            Direction::Inverse => {
-                let mut data = crate::core::memory::try_copy(input)
-                    .map_err(|error| GpuError::Execution(error.to_string()))?;
-                filters::inverse(&mut data, transform).map(|()| data)
-            }
-        }
-        .map_err(|error| GpuError::Execution(error.to_string()))?;
-        if output != reference {
+        // Verify every byte without allocating a second segment-sized
+        // buffer. Native SDK output can never silently alter archive bytes.
+        if !filters::matches_exact_filter(input, &output, transform, direction) {
             return Err(GpuError::Execution(format!(
                 "{} GPU #{ordinal} disagrees with exact CPU filter", self.kind.label()
             )));
