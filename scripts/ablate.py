@@ -54,79 +54,92 @@ const fn parse_switch(text: &[u8], at: usize, value: usize) -> usize {
 
 # (file, text that must occur exactly once, replacement). Text is matched
 # verbatim, so a source change that moves an anchor fails loudly.
+# The switches live in `cm/mod.rs`; patched code names them by full path, so
+# no import list has to be an anchor.
+ABLATE = "crate::core::cm::ABLATE"
+SKIP_APM = "crate::core::cm::SKIP_APM"
+SKIP_ISSE = "crate::core::cm::SKIP_ISSE"
+SKIP_STAGE_APM = f"            if {ABLATE} == 100 + stage || ({SKIP_APM} >> stage) & 1 == 1 {{\n                continue;\n            }}\n"
+SKIP_STAGE_ISSE = f"            if {ABLATE} == 110 + stage || ({SKIP_ISSE} >> stage) & 1 == 1 {{\n                continue;\n            }}\n"
+FRONT = CM + "predictor/front.rs"
+MIXING = CM + "predictor/mixing.rs"
+CALIBRATION = CM + "predictor/calibration.rs"
+FINAL_AVERAGE = "        let prediction = ((u32::from(first_final) + u32::from(second_final) + 1) >> 1) as u16;\n"
+
 PATCHES = [
     (CM + "mod.rs", "mod adapt;\n", SWITCH + "mod adapt;\n"),
-    (CM + "predictor.rs", "use super::{\n", "use super::{\n    ABLATE, SKIP_APM, SKIP_ISSE,\n"),
     (  # calibration stages 100..108
-        CM + "predictor.rs",
-        "        for (map, context) in self.apms.iter_mut().zip(contexts) {\n",
-        "        for (stage, (map, context)) in self.apms.iter_mut().zip(contexts).enumerate() {\n"
-        "            if ABLATE == 100 + stage || (SKIP_APM >> stage) & 1 == 1 {\n                continue;\n            }\n",
+        CALIBRATION,
+        "        for (map, &context) in self.apms.iter_mut().zip(&mixed.calibration) {\n",
+        "        for (stage, (map, &context)) in self.apms.iter_mut().zip(&mixed.calibration).enumerate() {\n"
+        + SKIP_STAGE_APM,
     ),
     (
-        CM + "predictor.rs",
+        CALIBRATION,
         "        for map in &mut self.apms {\n",
-        "        for (stage, map) in self.apms.iter_mut().enumerate() {\n"
-        "            if ABLATE == 100 + stage || (SKIP_APM >> stage) & 1 == 1 {\n                continue;\n            }\n",
+        "        for (stage, map) in self.apms.iter_mut().enumerate() {\n" + SKIP_STAGE_APM,
     ),
     (  # ISSE experts 110..112
-        CM + "predictor.rs",
-        "        for (expert, index) in self.isse.iter_mut().zip(ISSE_MAPS) {\n",
-        "        for (stage, (expert, index)) in self.isse.iter_mut().zip(ISSE_MAPS).enumerate() {\n"
-        "            if ABLATE == 110 + stage || (SKIP_ISSE >> stage) & 1 == 1 {\n                continue;\n            }\n",
+        CALIBRATION,
+        "        for (expert, state) in self.isse.iter_mut().zip(mixed.isse_states) {\n",
+        "        for (stage, (expert, state)) in self.isse.iter_mut().zip(mixed.isse_states).enumerate() {\n"
+        + SKIP_STAGE_ISSE,
     ),
     (
-        CM + "predictor.rs",
+        CALIBRATION,
         "        for expert in &mut self.isse {\n",
-        "        for (stage, expert) in self.isse.iter_mut().enumerate() {\n"
-        "            if ABLATE == 110 + stage || (SKIP_ISSE >> stage) & 1 == 1 {\n                continue;\n            }\n",
+        "        for (stage, expert) in self.isse.iter_mut().enumerate() {\n" + SKIP_STAGE_ISSE,
     ),
-    (  # first-layer mixers 120..122, neighbours 130
-        CM + "predictor.rs",
-        "        let neighbors = self.neighbors.feature(self.prefix);\n",
-        "        if (120..123).contains(&ABLATE) {\n            self.second[ABLATE.saturating_sub(120)] = 0;\n        }\n"
-        "        let neighbors = if ABLATE == 130 {\n            [0; neighbors::FEATURES]\n        } else {\n"
+    (  # first-layer mixers 120..122
+        MIXING,
+        "        self.second[NEIGHBOR_INPUT] = signals.neighbors[0];\n",
+        f"        if (120..123).contains(&{ABLATE}) {{\n            self.second[{ABLATE}.saturating_sub(120)] = 0;\n        }}\n"
+        "        self.second[NEIGHBOR_INPUT] = signals.neighbors[0];\n",
+    ),
+    (  # neighbours 130
+        FRONT,
+        "        signals.neighbors = self.neighbors.feature(self.prefix);\n",
+        f"        signals.neighbors = if {ABLATE} == 130 {{\n            [0; neighbors::FEATURES]\n        }} else {{\n"
         "            self.neighbors.feature(self.prefix)\n        };\n",
     ),
     (  # experts 140..143: forced dormant for the whole byte
-        CM + "predictor.rs",
+        FRONT,
         "            self.expert_active[3] = self.rows.active();\n",
         "            self.expert_active[3] = self.rows.active();\n"
-        "            for e in 0..EXPERTS {\n                if ABLATE == 140 + e {\n"
+        f"            for e in 0..EXPERTS {{\n                if {ABLATE} == 140 + e {{\n"
         "                    self.expert_active[e] = false;\n                }\n            }\n",
     ),
     (  # second final mixer 150 (use the first only), first final mixer 151
-        CM + "predictor.rs",
-        "        let mut prediction = ((u32::from(first_final) + u32::from(second_final) + 1) >> 1) as u16;\n",
-        "        let (first_final, second_final) = match ABLATE {\n"
+        MIXING,
+        FINAL_AVERAGE,
+        f"        let (first_final, second_final) = match {ABLATE} {{\n"
         "            150 => (first_final, first_final),\n            151 => (second_final, second_final),\n"
-        "            _ => (first_final, second_final),\n        };\n"
-        "        let mut prediction = ((u32::from(first_final) + u32::from(second_final) + 1) >> 1) as u16;\n",
+        "            _ => (first_final, second_final),\n        };\n" + FINAL_AVERAGE,
     ),
     (  # record model 160
-        CM + "predictor.rs",
+        FRONT,
         "            self.record_active = record.is_some();\n",
-        "            self.record_active = record.is_some() && ABLATE != 160;\n",
+        f"            self.record_active = record.is_some() && {ABLATE} != 160;\n",
     ),
     (  # match input 161
-        CM + "predictor.rs",
+        FRONT,
         "            .copy_from_slice(&self.matcher.features(self.prefix));\n",
-        "            .copy_from_slice(&if ABLATE == 161 {\n                [0; 2]\n            } else {\n"
+        f"            .copy_from_slice(&if {ABLATE} == 161 {{\n                [0; 2]\n            }} else {{\n"
         "                self.matcher.features(self.prefix)\n            });\n",
     ),
     (  # run input 162, order-0 input 163
-        CM + "predictor.rs",
-        "        self.inputs[RUN_INPUT] = logistic::stretch(self.run.probability(self.prefix));\n",
-        "        self.inputs[RUN_INPUT] = if ABLATE == 162 {\n            0\n        } else {\n"
+        FRONT,
+        "        signals.inputs[RUN_INPUT] = logistic::stretch(self.run.probability(self.prefix));\n",
+        f"        signals.inputs[RUN_INPUT] = if {ABLATE} == 162 {{\n            0\n        }} else {{\n"
         "            logistic::stretch(self.run.probability(self.prefix))\n        };\n"
-        "        if ABLATE == 163 {\n            self.inputs[ORDER0_INPUT] = 0;\n        }\n",
+        f"        if {ABLATE} == 163 {{\n            signals.inputs[ORDER0_INPUT] = 0;\n        }}\n",
     ),
     (  # context maps 170..179
-        CM + "predictor.rs",
-        "        self.lap(Step::ContextMaps);\n",
-        "        self.lap(Step::ContextMaps);\n"
-        "        if (170..170 + CONTEXTS).contains(&ABLATE) {\n            let i = ABLATE.saturating_sub(170);\n"
-        "            self.inputs[i * FEATURES..(i + 1) * FEATURES].fill(0);\n        }\n",
+        FRONT,
+        "        lap(meter, Step::ContextMaps);\n",
+        "        lap(meter, Step::ContextMaps);\n"
+        f"        if (170..170 + CONTEXTS).contains(&{ABLATE}) {{\n            let i = {ABLATE}.saturating_sub(170);\n"
+        "            signals.inputs[i * FEATURES..(i + 1) * FEATURES].fill(0);\n        }\n",
     ),
     (  # built-in primer 180
         CM + "segment.rs",
@@ -144,10 +157,15 @@ PATCHES = [
         "    let inflated = timing.time(Step::DeflateTransform, || {\n"
         "        if super::ABLATE == 182 {\n            return None;\n        }\n",
     ),
-    (  # second (unprimed) trial 183
+    (  # second (unprimed) trial 183: one model reserved, one trial run
         CM + "segment.rs",
-        "= if input.len() > UNPRIMED_TRIAL_BYTES {\n",
-        "= if input.len() > UNPRIMED_TRIAL_BYTES || super::ABLATE == 183 {\n",
+        "    let models = if input.len() > UNPRIMED_TRIAL_BYTES {\n",
+        "    let models = if input.len() > UNPRIMED_TRIAL_BYTES || super::ABLATE == 183 {\n",
+    ),
+    (
+        CM + "segment.rs",
+        "Vec<Chunk>)>> = if input.len() > UNPRIMED_TRIAL_BYTES {\n",
+        "Vec<Chunk>)>> = if input.len() > UNPRIMED_TRIAL_BYTES || super::ABLATE == 183 {\n",
     ),
 ]
 
@@ -184,6 +202,8 @@ def patched_sources(work: Path) -> Path:
     if tree.exists():
         shutil.rmtree(tree)
     shutil.copytree(ROOT / "src", tree / "src")
+    # The CUDA backend embeds its kernels from `native/` at compile time.
+    shutil.copytree(ROOT / "native", tree / "native")
     for name in ("Cargo.toml", "Cargo.lock", "build.rs"):
         if (ROOT / name).exists():
             shutil.copy(ROOT / name, tree / name)
