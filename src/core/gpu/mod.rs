@@ -17,7 +17,7 @@ pub mod streams;
 pub use backend::cuda;
 #[cfg(feature = "wgpu")]
 pub use backend::wgpu::Gpu;
-#[cfg(feature = "wgpu")]
+#[cfg(all(feature = "cuda", feature = "wgpu"))]
 pub(in crate::core::gpu) use backend::wgpu::{words, Kernel};
 
 use std::fmt;
