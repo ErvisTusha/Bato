@@ -204,6 +204,27 @@ def bounded_reader(stream, result, key, limit=65536):
 
 
 def kill_group(process):
+    """Terminate a benchmark subprocess tree on Unix or Windows.
+
+    Unix isolates benchmark process groups and kills the entire group. Windows
+    does not provide os.killpg, so taskkill /T /F terminates descendants. If
+    taskkill is unavailable, kill the direct process as a last resort.
+    """
+    if os.name == 'nt':
+        try:
+            subprocess.run(
+                ['taskkill', '/PID', str(process.pid), '/T', '/F'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=10, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        if process.poll() is None:
+            try:
+                process.kill()
+            except (ProcessLookupError, OSError):
+                pass
+        return
     try:
         group = getattr(process, 'benchmark_group', None)
         os.killpg(group if group is not None else os.getpgid(process.pid), signal.SIGKILL)
