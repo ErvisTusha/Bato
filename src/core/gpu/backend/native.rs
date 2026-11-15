@@ -65,14 +65,14 @@ impl NativeKind {
     }
 
     fn compiled() -> Vec<Self> {
-        let mut built = Vec::new();
-        #[cfg(feature = "hip")]
-        built.push(super::hip::KIND);
-        #[cfg(feature = "level-zero")]
-        built.push(super::level_zero::KIND);
-        #[cfg(feature = "metal")]
-        built.push(super::metal::KIND);
-        built
+        vec![
+            #[cfg(feature = "hip")]
+            super::hip::KIND,
+            #[cfg(feature = "level-zero")]
+            super::level_zero::KIND,
+            #[cfg(feature = "metal")]
+            super::metal::KIND,
+        ]
     }
 }
 
