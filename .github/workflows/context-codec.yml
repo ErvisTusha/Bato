@@ -41,6 +41,35 @@ jobs:
       - name: Verify CPU-only archive round trips
         run: python3 scripts/run_tests.py --bato-bin target/release/bato --timeout 180
 
+  native-feature-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo check --locked --all-targets --features hip
+      - run: cargo check --locked --all-targets --features level-zero
+      - run: cargo check --locked --all-targets --features metal
+      - run: cargo clippy --release --all-targets --locked --features hip,level-zero,metal -- -D warnings
+      - run: cargo test --release --locked --features hip,level-zero,metal
+      - name: Verify native plugin ABI can be compiled as C and C++
+        run: |
+          cc -x c -fsyntax-only native/include/bato_gpu_backend.h
+          c++ -x c++ -fsyntax-only native/include/bato_gpu_backend.h
+
+  apple-metal-build:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build direct Metal plugin with Xcode
+        run: bash scripts/build_native_backends.sh metal
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo check --locked --features metal
+
   portable-paths:
     strategy:
       matrix:
