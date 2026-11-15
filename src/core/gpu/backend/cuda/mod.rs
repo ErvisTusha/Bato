@@ -8,9 +8,10 @@ pub(crate) mod filters;
 
 use super::super::GpuError;
 use driver::{Device, DevicePointer, Driver, Handle};
+#[cfg(feature = "wgpu")]
+use std::ptr::NonNull;
 use std::{
     ffi::{c_char, c_int, c_uint, c_void, CStr},
-    ptr::NonNull,
     rc::Rc,
 };
 
@@ -312,6 +313,7 @@ impl Memory {
     }
 
     /// Device memory of `words` zero 32-bit values.
+    #[cfg(feature = "wgpu")]
     pub(in crate::core::gpu) fn zeroed(cuda: &Cuda, words: usize) -> Result<Self, GpuError> {
         let memory = Self::allocate::<u32>(cuda, words)?;
         // SAFETY: the allocation holds exactly `words` 32-bit values.
@@ -372,6 +374,7 @@ impl Drop for Memory {
     }
 }
 
+#[cfg(feature = "wgpu")]
 /// Page-locked host memory, which the driver copies to and from the device
 /// without an intermediate buffer.
 pub(in crate::core::gpu) struct Pinned<T: Plain> {
@@ -380,6 +383,7 @@ pub(in crate::core::gpu) struct Pinned<T: Plain> {
     length: usize,
 }
 
+#[cfg(feature = "wgpu")]
 impl<T: Plain> Pinned<T> {
     /// `length` zero values.
     pub(in crate::core::gpu) fn new(cuda: &Cuda, length: usize) -> Result<Self, GpuError> {
@@ -415,6 +419,7 @@ impl<T: Plain> Pinned<T> {
     }
 }
 
+#[cfg(feature = "wgpu")]
 impl<T: Plain> Drop for Pinned<T> {
     fn drop(&mut self) {
         // Nothing can be done about a failed release while dropping.
