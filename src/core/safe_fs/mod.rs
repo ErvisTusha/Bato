@@ -648,6 +648,27 @@ mod tests {
     }
     #[cfg(windows)]
     #[test]
+    fn staged_file_publication_closes_windows_source_handle() {
+        use std::io::Write;
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("published.bato");
+        let stage = AtomicOutput::new(&output, Overwrite::Refuse, None).unwrap();
+        let mut writer = stage.writer().unwrap();
+        writer.write_all(b"lossless archive payload").unwrap();
+        drop(writer);
+        stage.publish().unwrap();
+        assert_eq!(fs::read(&output).unwrap(), b"lossless archive payload");
+
+        let stage = AtomicOutput::new(&output, Overwrite::Replace, None).unwrap();
+        let mut writer = stage.writer().unwrap();
+        writer.write_all(b"replacement archive payload").unwrap();
+        drop(writer);
+        stage.publish().unwrap();
+        assert_eq!(fs::read(&output).unwrap(), b"replacement archive payload");
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn pinned_ancestor_denies_rename_until_the_operation_ends() {
         let root = tempfile::tempdir().unwrap();
         let parent = root.path().join("parent");
