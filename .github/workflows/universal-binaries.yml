@@ -79,6 +79,12 @@ jobs:
           set -euo pipefail
           "./target/release/${{ matrix.executable }}" --help > bato-help.txt 2>&1
           grep -F -- '--compute auto|cpu|cuda|hip|level-zero|metal|wgpu' bato-help.txt
+          grep -F -- 'Compiled GPU backends: CUDA, HIP, Level Zero, Metal, wgpu' bato-help.txt
+          if [[ '${{ matrix.metal }}' == 'true' ]]; then
+            grep -F -- 'bundled native SDK libraries: metal' bato-help.txt
+          else
+            grep -F -- 'bundled native SDK libraries: none' bato-help.txt
+          fi
       - name: Validate lossless archive round trip
         shell: bash
         run: |
