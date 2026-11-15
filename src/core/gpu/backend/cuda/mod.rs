@@ -323,7 +323,10 @@ impl Memory {
     }
 
     /// Device memory holding a copy of `values`.
-    pub(in crate::core::gpu) fn uploaded<T: Plain>(cuda: &Cuda, values: &[T]) -> Result<Self, GpuError> {
+    pub(in crate::core::gpu) fn uploaded<T: Plain>(
+        cuda: &Cuda,
+        values: &[T],
+    ) -> Result<Self, GpuError> {
         let memory = Self::allocate::<T>(cuda, values.len())?;
         memory.write(values)?;
         Ok(memory)
