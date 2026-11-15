@@ -17,6 +17,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check
+      - run: python3 scripts/check_universal_features.py
       - run: cargo clippy --release --all-targets --locked -- -D warnings
       - run: cargo test --locked
       - run: cargo test --release --locked
@@ -82,6 +83,11 @@ jobs:
         env:
           BATO_TEST_NATIVE_PLUGIN: "1"
           BATO_HIP_LIBRARY: ${{ github.workspace }}/target/native/libbato_test_abi.so
+        run: cargo test --release --locked --no-default-features --features hip native_plugin_fixture_matches_cpu_filter_and_inverse -- --nocapture
+      - name: Verify native plugin embedded inside a single executable
+        env:
+          BATO_BUNDLE_HIP_LIBRARY: ${{ github.workspace }}/target/native/libbato_test_abi.so
+          BATO_TEST_NATIVE_PLUGIN: '1'
         run: cargo test --release --locked --no-default-features --features hip native_plugin_fixture_matches_cpu_filter_and_inverse -- --nocapture
       - name: Verify native plugin ABI can be compiled as C and C++
         run: |
