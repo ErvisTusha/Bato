@@ -94,7 +94,7 @@ By default, Bato utilizes all available CPU cores (`--threads 0`) and manages up
 - `--memory-budget <auto|BYTES>`: Set memory budget (e.g. `2G`, `512M`).
 - `--segment-size BYTES`: Set segment geometry (default: 64 MiB).
 - `--timing`: Display per-stage time and bit attribution breakdowns.
-- `--compute auto|cpu|cuda|wgpu` selects the experimental byte-filter backend.
+- `--compute auto|cpu|cuda|hip|level-zero|metal|wgpu` selects the experimental byte-filter backend.
   CPU is the default. Auto tries GPU filters on 8–64 MiB segments and uses the
   CPU when no device is available or a device is busy. Select `cuda` or `wgpu`
   to test eligible filters explicitly and surface device errors.
@@ -107,6 +107,12 @@ By default, Bato utilizes all available CPU cores (`--threads 0`) and manages up
 - The device backends apply the existing delta and byte-shuffle transforms.
   The context model, entropy coder and checksums run on the CPU. GPU filters
   preserve the archive format and are designed to produce the same bytes.
+- Experimental native AMD HIP, Intel oneAPI Level Zero, and direct Apple Metal
+  filter backends are available as **optional Cargo features and vendor SDK
+  plugins**. See [native GPU build instructions](native/README.md).
+  Native plugin output is checked against the CPU reference on every call.
+- `--compute auto` retains CUDA, wgpu and CPU fallback when a native plugin
+  is missing, unsupported, or fails validation.
 - `--stats` reports successful CUDA and wgpu launches, processed filter bytes,
   and the devices that completed work. Zero launches indicate CPU processing
   for that phase.
