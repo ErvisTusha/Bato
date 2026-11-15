@@ -30,7 +30,7 @@ const _: () = assert!(cfg!(target_endian = "little"));
 ///
 /// # Safety
 /// Implementors have no padding and no invalid bit patterns.
-pub(super) unsafe trait Plain: Copy {}
+pub(in crate::core::gpu) unsafe trait Plain: Copy {}
 // SAFETY: primitive integers have no padding and no invalid bit patterns.
 unsafe impl Plain for i16 {}
 // SAFETY: as above.
@@ -70,18 +70,18 @@ impl Drop for Session {
 #[derive(Clone)]
 pub struct Cuda(Rc<Session>);
 
-pub(super) struct Adapter {
-    pub(super) ordinal: c_int,
-    pub(super) pci_bus_id: String,
+pub(in crate::core::gpu) struct Adapter {
+    pub(in crate::core::gpu) ordinal: c_int,
+    pub(in crate::core::gpu) pci_bus_id: String,
 }
 
 /// A kernel of the loaded module.
 #[derive(Clone, Copy)]
-pub(super) struct Function(Handle);
+pub(in crate::core::gpu) struct Function(Handle);
 
 /// One argument of a kernel launch.
 #[derive(Clone, Copy)]
-pub(super) enum Argument {
+pub(in crate::core::gpu) enum Argument {
     Memory(DevicePointer),
     Word(u32),
 }
@@ -92,11 +92,11 @@ impl Cuda {
         Self::open(0, driver::SCHED_SPIN)
     }
 
-    pub(super) fn open_for_filters(ordinal: c_int) -> Result<Self, GpuError> {
+    pub(in crate::core::gpu) fn open_for_filters(ordinal: c_int) -> Result<Self, GpuError> {
         Self::open(ordinal, driver::SCHED_BLOCKING_SYNC)
     }
 
-    pub(super) fn adapters() -> Result<Vec<Adapter>, GpuError> {
+    pub(in crate::core::gpu) fn adapters() -> Result<Vec<Adapter>, GpuError> {
         let driver = Driver::load()?;
         // SAFETY: `cuInit` takes only its flags.
         driver.check(unsafe { (driver.init)(0) }, "cuInit")?;
@@ -225,7 +225,7 @@ impl Cuda {
     }
 
     /// The kernel called `name` in the loaded module.
-    pub(super) fn function(&self, name: &CStr) -> Result<Function, GpuError> {
+    pub(in crate::core::gpu) fn function(&self, name: &CStr) -> Result<Function, GpuError> {
         let mut function: Handle = std::ptr::null_mut();
         // SAFETY: `function` is a valid place, the module is loaded and
         // `name` is NUL-terminated.
@@ -237,7 +237,7 @@ impl Cuda {
 
     /// Starts `function` on at least `threads` threads; the caller's kernel
     /// ignores the surplus. `arguments` must match the kernel's parameters.
-    pub(super) fn launch(
+    pub(in crate::core::gpu) fn launch(
         &self,
         function: Function,
         threads: usize,
@@ -279,7 +279,7 @@ impl Cuda {
     }
 
     /// Waits until every launched kernel has finished.
-    pub(super) fn synchronize(&self) -> Result<(), GpuError> {
+    pub(in crate::core::gpu) fn synchronize(&self) -> Result<(), GpuError> {
         // SAFETY: the call takes no arguments and uses the current context.
         let status = unsafe { (self.0.driver.synchronize)() };
         self.0.driver.check(status, "cuCtxSynchronize")
@@ -287,7 +287,7 @@ impl Cuda {
 }
 
 /// An allocation in device memory.
-pub(super) struct Memory {
+pub(in crate::core::gpu) struct Memory {
     cuda: Cuda,
     pointer: DevicePointer,
     bytes: usize,
@@ -312,7 +312,7 @@ impl Memory {
     }
 
     /// Device memory of `words` zero 32-bit values.
-    pub(super) fn zeroed(cuda: &Cuda, words: usize) -> Result<Self, GpuError> {
+    pub(in crate::core::gpu) fn zeroed(cuda: &Cuda, words: usize) -> Result<Self, GpuError> {
         let memory = Self::allocate::<u32>(cuda, words)?;
         // SAFETY: the allocation holds exactly `words` 32-bit values.
         let status = unsafe { (cuda.0.driver.fill_words)(memory.pointer, 0, words) };
@@ -321,7 +321,7 @@ impl Memory {
     }
 
     /// Device memory holding a copy of `values`.
-    pub(super) fn uploaded<T: Plain>(cuda: &Cuda, values: &[T]) -> Result<Self, GpuError> {
+    pub(in crate::core::gpu) fn uploaded<T: Plain>(cuda: &Cuda, values: &[T]) -> Result<Self, GpuError> {
         let memory = Self::allocate::<T>(cuda, values.len())?;
         memory.write(values)?;
         Ok(memory)
@@ -338,7 +338,7 @@ impl Memory {
     }
 
     /// Copies `values`, which must fill the allocation, to the device.
-    pub(super) fn write<T: Plain>(&self, values: &[T]) -> Result<(), GpuError> {
+    pub(in crate::core::gpu) fn write<T: Plain>(&self, values: &[T]) -> Result<(), GpuError> {
         self.check_size::<T>(values.len())?;
         // SAFETY: `values` is readable for `bytes` bytes, the size of the
         // device allocation, as checked above.
@@ -349,7 +349,7 @@ impl Memory {
     }
 
     /// Waits for running kernels and copies the whole allocation to `values`.
-    pub(super) fn read<T: Plain>(&self, values: &mut [T]) -> Result<(), GpuError> {
+    pub(in crate::core::gpu) fn read<T: Plain>(&self, values: &mut [T]) -> Result<(), GpuError> {
         self.check_size::<T>(values.len())?;
         // SAFETY: `values` is writable for `bytes` bytes, as checked above,
         // and every bit pattern is a valid `T`.
@@ -359,7 +359,7 @@ impl Memory {
         self.cuda.0.driver.check(status, "cuMemcpyDtoH")
     }
 
-    pub(super) fn argument(&self) -> Argument {
+    pub(in crate::core::gpu) fn argument(&self) -> Argument {
         Argument::Memory(self.pointer)
     }
 }
@@ -374,7 +374,7 @@ impl Drop for Memory {
 
 /// Page-locked host memory, which the driver copies to and from the device
 /// without an intermediate buffer.
-pub(super) struct Pinned<T: Plain> {
+pub(in crate::core::gpu) struct Pinned<T: Plain> {
     cuda: Cuda,
     pointer: NonNull<T>,
     length: usize,
@@ -382,7 +382,7 @@ pub(super) struct Pinned<T: Plain> {
 
 impl<T: Plain> Pinned<T> {
     /// `length` zero values.
-    pub(super) fn new(cuda: &Cuda, length: usize) -> Result<Self, GpuError> {
+    pub(in crate::core::gpu) fn new(cuda: &Cuda, length: usize) -> Result<Self, GpuError> {
         let bytes = length
             .checked_mul(std::mem::size_of::<T>())
             .filter(|&bytes| bytes > 0)
@@ -403,13 +403,13 @@ impl<T: Plain> Pinned<T> {
         })
     }
 
-    pub(super) fn as_slice(&self) -> &[T] {
+    pub(in crate::core::gpu) fn as_slice(&self) -> &[T] {
         // SAFETY: the allocation holds `length` initialised values and lives
         // as long as `self`.
         unsafe { std::slice::from_raw_parts(self.pointer.as_ptr(), self.length) }
     }
 
-    pub(super) fn as_mut_slice(&mut self) -> &mut [T] {
+    pub(in crate::core::gpu) fn as_mut_slice(&mut self) -> &mut [T] {
         // SAFETY: as in `as_slice`, and `&mut self` makes the access unique.
         unsafe { std::slice::from_raw_parts_mut(self.pointer.as_ptr(), self.length) }
     }
