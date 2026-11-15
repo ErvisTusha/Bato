@@ -61,7 +61,7 @@ pub(super) fn inverse_on(
     inverse(raw, transform)
 }
 
-pub(super) fn forward(raw: &[u8], t: TransformId) -> Result<Vec<u8>, BatoError> {
+pub(crate) fn forward(raw: &[u8], t: TransformId) -> Result<Vec<u8>, BatoError> {
     if t.is_deflate_container() {
         return Err(not_a_filter());
     }
@@ -92,7 +92,7 @@ pub(super) fn forward(raw: &[u8], t: TransformId) -> Result<Vec<u8>, BatoError> 
     }
     Ok(out)
 }
-pub(super) fn inverse(raw: &mut [u8], t: TransformId) -> Result<(), BatoError> {
+pub(crate) fn inverse(raw: &mut [u8], t: TransformId) -> Result<(), BatoError> {
     if t.is_deflate_container() {
         return Err(not_a_filter());
     }
