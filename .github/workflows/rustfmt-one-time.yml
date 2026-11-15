@@ -1,0 +1,41 @@
+name: One-time Rustfmt repair
+
+on:
+  push:
+    branches: [claude/focused-faraday-t2c712]
+
+permissions:
+  contents: write
+
+# This temporary workflow formats the current code using the actual Rust
+# toolchain. It is removed after the formatting commit is confirmed.
+concurrency:
+  group: bato-one-time-rustfmt-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  format-and-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Apply canonical Rust formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all
+          git diff --check
+          if [[ -n "$(git status --porcelain)" ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add --update
+            git commit -m "style: apply canonical rustfmt to GPU implementation"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          else
+            echo "Rust sources are already formatted."
+          fi
