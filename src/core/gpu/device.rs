@@ -39,7 +39,10 @@ pub(super) struct DeviceSlot {
 
 #[cfg(any(feature = "cuda", feature = "wgpu"))]
 impl DeviceSlot {
-    pub(super) fn acquire(&self, compute: Compute) -> Result<Option<MutexGuard<'_, DeviceState>>, GpuError> {
+    pub(super) fn acquire(
+        &self,
+        compute: Compute,
+    ) -> Result<Option<MutexGuard<'_, DeviceState>>, GpuError> {
         let result = if compute == Compute::Auto {
             self.state.try_lock()
         } else {
@@ -119,7 +122,9 @@ impl Devices {
                 identity
                     .filter(|identity| {
                         cuda.iter()
-                            .filter(|candidate| pci_identity(&candidate.pci_bus_id) == Some(*identity))
+                            .filter(|candidate| {
+                                pci_identity(&candidate.pci_bus_id) == Some(*identity)
+                            })
                             .count() == 1
                     })
                     .and_then(|identity| {
