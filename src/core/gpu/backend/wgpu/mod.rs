@@ -1,6 +1,9 @@
-//! Portable byte-filter backend for Vulkan, Metal and Direct3D 12.
-//! Provenance: original Bato WGSL filters, relocated without behavior changes.
+//! Cross-platform wgpu implementation for Vulkan, Metal and Direct3D 12.
+//! Its dependency and operations are absent from CUDA-only or native-only builds.
 
+mod context;
 mod filters;
 
-pub(super) use filters::WgpuFilters;
+pub use context::Gpu;
+pub(in crate::core::gpu) use context::{words, Kernel, NVIDIA_VENDOR};
+pub(in crate::core::gpu) use filters::WgpuFilters;
