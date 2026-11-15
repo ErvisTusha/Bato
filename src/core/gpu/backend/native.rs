@@ -8,7 +8,12 @@
 use super::super::{filters::Direction, GpuError};
 use crate::core::{cm::filters, types::TransformId};
 use libloading::Library;
-use std::path::PathBuf;
+use std::{
+    fs,
+    path::PathBuf,
+    sync::{Arc, Mutex, OnceLock, Weak},
+};
+use tempfile::TempDir;
 
 const ABI_VERSION: u32 = 1;
 type VersionFn = unsafe extern "C" fn() -> u32;
@@ -71,9 +76,63 @@ impl NativeKind {
     }
 }
 
+// These vendor binaries can be compiled once during platform packaging and
+// then carried inside the executable. They remain optional for source builds
+// without a vendor SDK; wgpu handles the same physical hardware as fallback.
+fn embedded_library(kind: NativeKind) -> Option<&'static [u8]> {
+    match kind {
+        #[cfg(bato_embedded_hip)]
+        NativeKind::Hip => Some(include_bytes!(env!("BATO_EMBEDDED_HIP_LIBRARY"))),
+        #[cfg(bato_embedded_level_zero)]
+        NativeKind::LevelZero => Some(include_bytes!(env!("BATO_EMBEDDED_LEVEL_ZERO_LIBRARY"))),
+        #[cfg(bato_embedded_metal)]
+        NativeKind::Metal => Some(include_bytes!(env!("BATO_EMBEDDED_METAL_LIBRARY"))),
+        _ => None,
+    }
+}
+
+/// Temporary extraction is private to the current process: no installer or
+/// extra user download is needed. A weak handle allows cleanup after the last
+/// native module unloads, including on Windows.
+static BUNDLE: OnceLock<Mutex<Weak<TempDir>>> = OnceLock::new();
+
+fn bundled_library_path(
+    kind: NativeKind,
+) -> Result<Option<(PathBuf, Arc<TempDir>)>, GpuError> {
+    let Some(data) = embedded_library(kind) else {
+        return Ok(None);
+    };
+    let cache = BUNDLE.get_or_init(|| Mutex::new(Weak::new()));
+    let mut held = cache
+        .lock()
+        .map_err(|_| GpuError::Execution("native GPU bundle lock poisoned".into()))?;
+    let dir = match held.upgrade() {
+        Some(dir) => dir,
+        None => {
+            let created = Arc::new(
+                tempfile::Builder::new()
+                    .prefix("bato-native-gpu-")
+                    .tempdir()
+                    .map_err(|error| GpuError::Device(error.to_string()))?,
+            );
+            *held = Arc::downgrade(&created);
+            created
+        }
+    };
+    // A TempDir has a private, randomly generated path. The mutex ensures
+    // simultaneous archive workers cannot race to write the same plugin.
+    let path = dir.path().join(kind.filename());
+    if !path.exists() {
+        fs::write(&path, data)
+            .map_err(|error| GpuError::Device(format!("cannot extract embedded GPU library: {error}")))?;
+    }
+    Ok(Some((path, dir)))
+}
+
 struct Plugin {
-    // Keep the dynamically loaded library alive for the function pointers.
+    // The dynamic module unloads before its temporary extraction is removed.
     _library: Library,
+    _bundled_dir: Option<Arc<TempDir>>,
     kind: NativeKind,
     devices: u32,
     apply: ApplyFn,
@@ -81,12 +140,16 @@ struct Plugin {
 
 impl Plugin {
     fn open(kind: NativeKind) -> Result<Self, GpuError> {
-        let path = match std::env::var_os(kind.variable()) {
-            Some(value) => PathBuf::from(value),
-            None => PathBuf::from(kind.filename()),
+        let (path, bundled_dir) = match std::env::var_os(kind.variable()) {
+            Some(value) => (PathBuf::from(value), None),
+            None => match bundled_library_path(kind)? {
+                Some((path, dir)) => (path, Some(dir)),
+                None => (PathBuf::from(kind.filename()), None),
+            },
         };
         // SAFETY: loading a native library is explicitly opted into by the
-        // Cargo feature; the ABI is checked before any device call.
+        // Cargo feature; an embedded library is written to a private temporary
+        // directory. The ABI is checked before calling its filter functions.
         let library = unsafe { Library::new(&path) }
             .map_err(|e| GpuError::Device(format!("{}: {e}", path.display())))?;
         // SAFETY: the plugin ABI defines these exact symbol names and
@@ -119,6 +182,7 @@ impl Plugin {
         }
         Ok(Self {
             _library: library,
+            _bundled_dir: bundled_dir,
             kind,
             devices: discovered as u32,
             apply,
