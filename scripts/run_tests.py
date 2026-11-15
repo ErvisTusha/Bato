@@ -27,7 +27,6 @@ from pathlib import Path
 from bato_tools.codecs import resolve_bato
 from bato_tools.common import PROJECT_ROOT, sha256, snapshot
 from bato_tools.test_selection import DEFAULT_COPIED_CORPUS, select_samples
-from bato_tools.test_campaign import ensure_test_baselines
 
 BATO_BIN = None
 CLI_TIMEOUT = 30
@@ -1388,6 +1387,9 @@ def main(argv=None):
         print(f'Corpus input: {sample.relative_path} | {sample.size} bytes | SHA-256 {sample.digest}', flush=True)
     baseline_status = 0
     if samples:
+        # The real-corpus benchmark gate uses POSIX file locks. Keep it out
+        # of self-contained Windows/Linux/macOS archive tests entirely.
+        from bato_tools.test_campaign import ensure_test_baselines
         try:
             baseline_status = ensure_test_baselines(samples,args)
         except (OSError, ValueError, sqlite3.Error) as error:
