@@ -4,6 +4,7 @@
 //! PTX text, so only the installed NVIDIA driver is needed, not the Toolkit.
 
 mod driver;
+pub(crate) mod filters;
 
 use super::GpuError;
 use driver::{Device, DevicePointer, Driver, Handle};
@@ -32,6 +33,8 @@ const _: () = assert!(cfg!(target_endian = "little"));
 pub(super) unsafe trait Plain: Copy {}
 // SAFETY: primitive integers have no padding and no invalid bit patterns.
 unsafe impl Plain for i16 {}
+// SAFETY: as above.
+unsafe impl Plain for u8 {}
 // SAFETY: as above.
 unsafe impl Plain for i32 {}
 // SAFETY: as above.
@@ -72,6 +75,7 @@ pub struct Cuda(Rc<Session>);
 pub(super) struct Function(Handle);
 
 /// One argument of a kernel launch.
+#[derive(Clone, Copy)]
 pub(super) enum Argument {
     Memory(DevicePointer),
     Word(u32),
@@ -80,6 +84,14 @@ pub(super) enum Argument {
 impl Cuda {
     /// Opens the first CUDA device and loads the kernels, or says why not.
     pub fn probe() -> Result<Self, GpuError> {
+        Self::open(driver::SCHED_SPIN)
+    }
+
+    pub(super) fn open_for_filters() -> Result<Self, GpuError> {
+        Self::open(driver::SCHED_BLOCKING_SYNC)
+    }
+
+    fn open(schedule: c_uint) -> Result<Self, GpuError> {
         let driver = Driver::load()?;
         // SAFETY: `cuInit` takes only its flags.
         driver.check(unsafe { (driver.init)(0) }, "cuInit")?;
@@ -88,7 +100,7 @@ impl Cuda {
         let status = unsafe { (driver.device_count)(&mut count) };
         driver.check(status, "cuDeviceGetCount")?;
         if count < 1 {
-            return Err(GpuError::NoAdapter);
+            return Err(GpuError::Device("no CUDA device".into()));
         }
         let mut device: Device = 0;
         // SAFETY: `device` is a valid place and ordinal 0 exists.
@@ -110,7 +122,7 @@ impl Cuda {
         // The flag only chooses how waits are done, and a context that is
         // already active keeps its own flags, so a refusal is not an error.
         // SAFETY: the call takes the device handle and flags by value.
-        let _ = unsafe { (driver.set_context_flags)(device, driver::SCHED_SPIN) };
+        let _ = unsafe { (driver.set_context_flags)(device, schedule) };
         let mut context: Handle = std::ptr::null_mut();
         // SAFETY: `context` is a valid place for the handle written.
         let status = unsafe { (driver.retain_context)(&mut context, device) };
@@ -386,7 +398,15 @@ mod tests {
             Some(format!("// source sha256: {digest}").as_str()),
             "regenerate kernels.ptx as the header of kernels.cu describes"
         );
-        for entry in ["empty", "matvec", "streams"] {
+        for entry in [
+            "empty",
+            "matvec",
+            "streams",
+            "filter_bytes",
+            "filter_delta_local",
+            "filter_delta_carries",
+            "filter_delta_finish",
+        ] {
             assert!(super::PTX.contains(&format!(".visible .entry {entry}(")));
         }
     }

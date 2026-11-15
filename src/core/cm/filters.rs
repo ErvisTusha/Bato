@@ -3,6 +3,7 @@
 //! XZ delta filter; original implementations, always selected by byte cost.
 use super::x86::{self, Sites};
 use crate::core::{
+    gpu::cuda::filters::{Direction, WorkerFilters},
     memory::try_filled,
     types::{BatoError, TransformId},
 };
@@ -29,6 +30,37 @@ fn distance(t: TransformId) -> usize {
 fn not_a_filter() -> BatoError {
     BatoError::CorruptStream("deflate transform used as an in-place filter".into())
 }
+pub(super) fn forward_on(
+    raw: &[u8],
+    transform: TransformId,
+    accelerator: &mut Option<&mut WorkerFilters<'_>>,
+) -> Result<Vec<u8>, BatoError> {
+    if CANDIDATES.contains(&transform) {
+        if let Some(accelerator) = accelerator.as_deref_mut() {
+            if let Some(output) = accelerator.run(raw, transform, Direction::Forward)? {
+                return Ok(output);
+            }
+        }
+    }
+    forward(raw, transform)
+}
+
+pub(super) fn inverse_on(
+    raw: &mut Vec<u8>,
+    transform: TransformId,
+    accelerator: Option<&mut WorkerFilters<'_>>,
+) -> Result<(), BatoError> {
+    if CANDIDATES.contains(&transform) {
+        if let Some(accelerator) = accelerator {
+            if let Some(output) = accelerator.run(raw, transform, Direction::Inverse)? {
+                *raw = output;
+                return Ok(());
+            }
+        }
+    }
+    inverse(raw, transform)
+}
+
 pub(super) fn forward(raw: &[u8], t: TransformId) -> Result<Vec<u8>, BatoError> {
     if t.is_deflate_container() {
         return Err(not_a_filter());
@@ -92,6 +124,49 @@ pub(super) fn inverse(raw: &mut [u8], t: TransformId) -> Result<(), BatoError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cuda_filters_match_cpu_at_word_tile_and_tail_boundaries() {
+        use crate::core::gpu::cuda::{filters::apply, Cuda};
+
+        let cuda = match Cuda::probe() {
+            Ok(cuda) => cuda,
+            Err(reason) => {
+                assert!(
+                    std::env::var_os("BATO_TEST_REQUIRE_CUDA").is_none(),
+                    "{reason}"
+                );
+                eprintln!("CUDA filter parity skipped: {reason}");
+                return;
+            }
+        };
+        for length in [1, 3, 4, 63, 64, 65, 4095, 4096, 4097, 65539] {
+            let input: Vec<_> = (0..length)
+                .map(|i: u32| ((i.wrapping_mul(0x9e3779b1) >> 21) ^ (i >> 3)) as u8)
+                .collect();
+            let mut transformed = vec![0; input.len()];
+            let mut restored = transformed.clone();
+            for transform in CANDIDATES {
+                let expected = forward(&input, transform).unwrap();
+                apply(
+                    &cuda,
+                    &input,
+                    &mut transformed,
+                    (transform, Direction::Forward),
+                )
+                .unwrap();
+                assert_eq!(transformed, expected, "{transform:?} ({length} bytes)");
+                apply(
+                    &cuda,
+                    &transformed,
+                    &mut restored,
+                    (transform, Direction::Inverse),
+                )
+                .unwrap();
+                assert_eq!(restored, input, "{transform:?} ({length} bytes)");
+            }
+        }
+    }
     #[test]
     fn filters_preserve_unaligned_and_arbitrary_bytes() {
         for n in [0, 1, 2, 3, 7, 8, 257, 65539] {

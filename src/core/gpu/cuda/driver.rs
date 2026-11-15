@@ -19,6 +19,8 @@ pub(super) type Handle = *mut c_void;
 const SUCCESS: Status = 0;
 /// `CU_CTX_SCHED_SPIN`: wait for the device by spinning, the lowest latency.
 pub(super) const SCHED_SPIN: c_uint = 1;
+/// `CU_CTX_SCHED_BLOCKING_SYNC`: let CPU workers run while waiting for CUDA.
+pub(super) const SCHED_BLOCKING_SYNC: c_uint = 4;
 /// `CU_JIT_ERROR_LOG_BUFFER` and `CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES`.
 pub(super) const JIT_ERROR_LOG_BUFFER: c_uint = 5;
 pub(super) const JIT_ERROR_LOG_BUFFER_SIZE_BYTES: c_uint = 6;

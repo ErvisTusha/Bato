@@ -84,6 +84,21 @@ By default, Bato utilizes all available CPU cores (`--threads 0`) and manages up
 - `--memory-budget <auto|BYTES>`: Set memory budget (e.g. `2G`, `512M`).
 - `--segment-size BYTES`: Set segment geometry (default: 64 MiB).
 - `--timing`: Display per-stage time and bit attribution breakdowns.
+- `--compute auto|cpu|cuda`: Enable or disable experimental CUDA byte filters.
+  CPU is the default. Auto uses CUDA on eligible segments from 8 to 64 MiB
+  when the NVIDIA device and transfer slot are available. CPU workers can work on other segments
+  concurrently. The context model, entropy coding and checksums run on CPU.
+  Supported CUDA batches are at most 64 MiB. The embedded CUDA kernels
+  require an NVIDIA driver and a GPU compatible with PTX targeting sm_75.
+- `--stats`: Report CPU blocks and successful CUDA filter dispatches. A zero
+  dispatch count means the operation did not run a CUDA filter. Use
+  `--compute cuda --stats` for controlled comparisons. CUDA device errors
+  are reported in explicit CUDA mode. Auto falls back to the CPU.
+
+Compare both paths after a release build with
+`python3 scripts/benchmark_bato_table.py --branch-bin target/release/bato`.
+An asterisk marks a phase that used CUDA in every measured trial. Use
+`--show-usage` to print average CPU use and CUDA launch counts.
 
 ---
 

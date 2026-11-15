@@ -10,10 +10,10 @@ pub use crate::core::frame::{
     read_stream_layout, DecompressReader, StreamLayout,
 };
 pub use crate::core::types::{
-    BatoError, BlockHeader, BlockType, CompressionOptions, DecodeLimits, DecompressionOptions,
-    ExecutionOptions, ExecutionStats, ExecutionStatsSnapshot, Geometry, MemoryBudget, Overwrite,
-    StreamHeader, StreamKind, TransformId, DEFAULT_CHUNK_SIZE, DEFAULT_MEMORY_BUDGET,
-    DEFAULT_SEGMENT_SIZE, MAX_CHUNK_SIZE, VERSION_MAJOR, VERSION_MINOR,
+    BatoError, BlockHeader, BlockType, CompressionOptions, Compute, DecodeLimits,
+    DecompressionOptions, ExecutionOptions, ExecutionStats, ExecutionStatsSnapshot, Geometry,
+    MemoryBudget, Overwrite, StreamHeader, StreamKind, TransformId, DEFAULT_CHUNK_SIZE,
+    DEFAULT_MEMORY_BUDGET, DEFAULT_SEGMENT_SIZE, MAX_CHUNK_SIZE, VERSION_MAJOR, VERSION_MINOR,
 };
 pub use crate::core::TimingReport;
 use std::io::Cursor;

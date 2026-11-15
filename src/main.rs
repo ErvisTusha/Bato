@@ -11,8 +11,9 @@ use bato_engine::core::safe_fs::{absolute_path, open_regular_file, AtomicOutput}
 use bato_engine::{
     compress_stream, create_solid_archive_excluding, decompress_stream_with_options,
     extract_solid_archive_with_execution, read_stream_header, read_stream_layout,
-    CompressionOptions, DecodeLimits, DecompressionOptions, ExecutionOptions, ExecutionStats,
-    Geometry, MemoryBudget, Overwrite, StreamHeader, StreamKind, VERSION_MAJOR, VERSION_MINOR,
+    CompressionOptions, Compute, DecodeLimits, DecompressionOptions, ExecutionOptions,
+    ExecutionStats, Geometry, MemoryBudget, Overwrite, StreamHeader, StreamKind, VERSION_MAJOR,
+    VERSION_MINOR,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -114,7 +115,7 @@ fn help() {
         VERSION_MINOR
     );
     eprintln!("Usage: bato [OPTIONS] [FILE]");
-    eprintln!("Options: -c -d -t -i archive extract -o PATH -f --segment-size BYTES --chunk-size BYTES --threads N --memory-budget auto|BYTES --stats --timing");
+    eprintln!("Options: -c -d -t -i archive extract -o PATH -f --segment-size BYTES --chunk-size BYTES --threads N --compute auto|cpu|cuda --memory-budget auto|BYTES --stats --timing");
     eprintln!("Archive commands: archive DIRECTORY, extract ARCHIVE [MEMBER...], add ARCHIVE PATH..., remove ARCHIVE MEMBER...");
     eprintln!("Archive options: --split-size BYTES --password-file FILE --protect MEMBER (repeatable) --public-only");
     eprintln!("Split recovery: archive --split-size BYTES [--parity | --parity-volumes N], repair-split ARCHIVE -o PATH");
@@ -172,6 +173,7 @@ fn parse(args: &[OsString]) -> Option<Command> {
     let mut geometry = Geometry::default();
     let mut budget = MemoryBudget::Auto;
     let mut threads = 0;
+    let mut compute = Compute::default();
     let mut print_stats = false;
     let mut print_timing = false;
     let mut archive = ArchiveOptions::default();
@@ -218,6 +220,14 @@ fn parse(args: &[OsString]) -> Option<Command> {
             "--segment-size" => geometry.segment_size = integer(args, &mut i, x, Zero::Rejected),
             "--chunk-size" => geometry.chunk_size = integer(args, &mut i, x, Zero::Rejected),
             "--threads" => threads = integer(args, &mut i, x, Zero::Allowed),
+            "--compute" => {
+                compute = match value(args, &mut i, x).to_str() {
+                    Some("auto") => Compute::Auto,
+                    Some("cpu") => Compute::Cpu,
+                    Some("cuda") => Compute::Cuda,
+                    _ => die("compute must be auto, cpu or cuda"),
+                }
+            }
             "--memory-budget" => {
                 budget = value(args, &mut i, x)
                     .to_str()
@@ -401,6 +411,7 @@ fn parse(args: &[OsString]) -> Option<Command> {
     }
     let execution = ExecutionOptions {
         threads,
+        compute,
         stats: std::sync::Arc::new(if print_timing {
             ExecutionStats::with_timing()
         } else {

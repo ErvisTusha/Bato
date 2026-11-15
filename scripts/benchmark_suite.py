@@ -24,7 +24,7 @@ def nonnegative(value):
     return value
 
 
-def main(argv=None):
+def main(argv=None, *, result_rows=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("-c", "--corpus", default="multi_corpus")
     parser.add_argument("-t", "--target", action="append", default=[], help="Repeatable relative path, glob, or substring")
@@ -55,6 +55,8 @@ def main(argv=None):
     parser.add_argument("--allow-unavailable", action="store_true", help="Record missing/failed tools and measure only ready codecs")
     parser.add_argument("--list-workloads", action="store_true", help="Print the manifest without generating fixtures, checking tools, or measuring")
     parser.add_argument("--workload", choices=["files", "directories", "both"], default="both")
+    parser.add_argument("--bato-compute", choices=["auto", "cpu", "cuda"],
+                        help="Byte filter backend for Bato binaries that support --compute")
     parser.add_argument("--bato-bin", help="Path to the Rust Bato executable")
     parser.add_argument("--only-bato", action="store_true")
     parser.add_argument("--codecs", help="Comma-separated bato,kgb,paq8px,paq8l,zpaq,cmix,nncp,rar,7z,xz,zstd,gzip,lz4,zip,bzip2; cmix/nncp require opt-in")
@@ -89,6 +91,8 @@ def main(argv=None):
     parser.add_argument('--init-db', action='store_true', help='Initialize database only; do not discover or benchmark inputs')
     args = parser.parse_args(argv)
     try:
+        if result_rows is not None and (args.init_db or args.archive_operations):
+            parser.error('Live results require a standard benchmark run')
         if args.ensure_competitors and (not args.codecs or any(c.strip().startswith('bato') for c in args.codecs.split(',')) or args.only_bato):
             parser.error('--ensure-competitors requires an explicit competitor-only --codecs list')
         if args.init_db:
@@ -106,10 +110,14 @@ def main(argv=None):
                     store.close()
             print(f'Database initialized: {args.database}')
             return 0
-        return run_archive_ops(args) if args.archive_operations else run_suite(args)
+        if args.archive_operations:
+            return run_archive_ops(args)
+        return run_suite(args, result_rows=result_rows)
     except KeyboardInterrupt:
-        message = "Interrupted. Completed trials are preserved in the database."
-        if not args.archive_operations:
+        message = "Interrupted."
+        if result_rows is None:
+            message += " Completed trials are preserved in the database."
+        if result_rows is None and not args.archive_operations:
             message += " Resume with the same settings and --resume RUN_ID."
         print(message, file=sys.stderr)
         return 130

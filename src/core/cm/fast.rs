@@ -5,6 +5,7 @@
 use super::{filters, huffman, lz, numbers, varint};
 use crate::core::{
     frame::block_cost,
+    gpu::cuda::filters::WorkerFilters,
     memory::try_copy,
     types::{BatoError, BlockType, TransformId},
 };
@@ -64,7 +65,11 @@ pub(super) fn unfiltered(raw: &[u8]) -> Result<Candidate, BatoError> {
     best.evaluate(raw, TransformId::None)?;
     Ok(best)
 }
-pub(super) fn best(raw: &[u8], x86: Option<TransformId>) -> Result<Candidate, BatoError> {
+pub(super) fn best(
+    raw: &[u8],
+    x86: Option<TransformId>,
+    accelerator: &mut Option<&mut WorkerFilters<'_>>,
+) -> Result<Candidate, BatoError> {
     let mut best = Candidate {
         kind: BlockType::Stored,
         transform: TransformId::None,
@@ -78,7 +83,7 @@ pub(super) fn best(raw: &[u8], x86: Option<TransformId>) -> Result<Candidate, Ba
         return Ok(best);
     }
     for filter in filters::CANDIDATES.into_iter().chain(x86) {
-        let transformed = filters::forward(raw, filter)?;
+        let transformed = filters::forward_on(raw, filter, accelerator)?;
         best.evaluate(&transformed, filter)?;
     }
     if let Some(coded) = numbers::encode(raw)? {

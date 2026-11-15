@@ -11,6 +11,7 @@ fn options(stats: ExecutionStats) -> CompressionOptions {
         execution: ExecutionOptions {
             threads: 2,
             stats: Arc::new(stats),
+            ..Default::default()
         },
         ..Default::default()
     }
@@ -71,6 +72,7 @@ fn decoding_with_timing_restores_the_input() {
             execution: ExecutionOptions {
                 threads: 2,
                 stats: stats.clone(),
+                ..Default::default()
             },
             ..Default::default()
         },

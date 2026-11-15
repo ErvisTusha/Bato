@@ -5,7 +5,7 @@ use super::cm::{
     segment::{self, Chunk, Coding, Direction, Trials},
 };
 use super::memory::{HostBudget, MemoryLease};
-use super::{checksum::crc32c, types::*};
+use super::{checksum::crc32c, gpu::cuda::filters::WorkerFilters, types::*};
 use std::{
     collections::BTreeMap,
     sync::{mpsc, Arc, Mutex},
@@ -112,7 +112,11 @@ fn encoded_chunk(chunk: Chunk, coding: Coding) -> EncodedChunk {
     }
 }
 
-fn execute(work: Work, stats: &ExecutionStats) -> Result<Output, BatoError> {
+fn execute(
+    work: Work,
+    stats: &ExecutionStats,
+    accelerator: &mut WorkerFilters<'_>,
+) -> Result<Output, BatoError> {
     match work {
         Work::Encode {
             mut raw,
@@ -124,7 +128,8 @@ fn execute(work: Work, stats: &ExecutionStats) -> Result<Output, BatoError> {
                 length: raw.len() as u64,
                 crc: timing.time(Step::Checksum, || crc32c(&raw)),
             };
-            let (chunks, coding) = segment::encode_segment(&mut raw, (descriptor, trials), timing)?;
+            let (chunks, coding) =
+                segment::encode_segment(&mut raw, (descriptor, trials), timing, Some(accelerator))?;
             stats.update(|s| s.cpu_blocks += chunks.len() as u64);
             Ok(Output::Encoded(
                 chunks
@@ -141,7 +146,13 @@ fn execute(work: Work, stats: &ExecutionStats) -> Result<Output, BatoError> {
         } => {
             let timing = stats.timing();
             let max_output = descriptor.segment_bytes();
-            let bytes = segment::decode_segment(&chunks, (descriptor, max_output), coding, timing)?;
+            let bytes = segment::decode_segment(
+                &chunks,
+                (descriptor, max_output),
+                coding,
+                timing,
+                Some(accelerator),
+            )?;
             stats.update(|s| s.cpu_blocks += chunks.len() as u64);
             Ok(Output::Decoded {
                 crc: timing.time(Step::Checksum, || crc32c(&bytes)),
@@ -186,14 +197,16 @@ impl Pool {
         let incoming = Arc::new(Mutex::new(incoming));
         let (finished, results) = mpsc::channel::<JobResult>();
         let mut handles = Vec::with_capacity(admission.workers);
+        let cuda_slot = Arc::new(Mutex::new(false));
         for _ in 0..admission.workers {
             let incoming = incoming.clone();
             let finished = finished.clone();
-            let stats = options.stats.clone();
+            let options = options.clone();
+            let cuda_slot = cuda_slot.clone();
             handles.push(
                 std::thread::Builder::new()
                     .stack_size(STACK_MEMORY)
-                    .spawn(move || run_worker(&incoming, &finished, &stats))?,
+                    .spawn(move || run_worker(&incoming, &finished, &options, &cuda_slot))?,
             );
         }
         Ok(Self {
@@ -273,19 +286,22 @@ impl Pool {
 fn run_worker(
     incoming: &Mutex<mpsc::Receiver<Job>>,
     finished: &mpsc::Sender<JobResult>,
-    stats: &ExecutionStats,
+    options: &ExecutionOptions,
+    cuda_slot: &Mutex<bool>,
 ) {
+    let mut accelerator = WorkerFilters::new(options.compute, cuda_slot, &options.stats);
     loop {
         let Ok((id, work, lease)) = incoming.lock().unwrap().recv() else {
             return;
         };
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute(work, stats)))
-                .unwrap_or_else(|_| Err(BatoError::CorruptStream("worker panicked".into())))
-                .map(|output| Completed {
-                    output,
-                    memory: Some(lease),
-                });
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            execute(work, &options.stats, &mut accelerator)
+        }))
+        .unwrap_or_else(|_| Err(BatoError::CorruptStream("worker panicked".into())))
+        .map(|output| Completed {
+            output,
+            memory: Some(lease),
+        });
         if finished.send((id, result)).is_err() {
             return;
         }

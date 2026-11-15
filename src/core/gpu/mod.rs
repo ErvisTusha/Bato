@@ -4,9 +4,8 @@
 //! compute model as implemented by the `wgpu` crate (MIT OR Apache-2.0), or,
 //! for NVIDIA, through the CUDA Driver API in `cuda`.
 //!
-//! Nothing in the codec calls this module yet: archives do not depend on it.
-//! It exists to measure, on real hardware, which integer workloads a GPU
-//! finishes sooner than the CPU with identical results.
+//! The archive codec can use CUDA for delta and byte-shuffle filters. The
+//! matrix-vector and stream kernels are used for standalone measurements.
 
 pub mod cuda;
 pub mod matvec;

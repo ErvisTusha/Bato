@@ -14,6 +14,7 @@ use super::{
 };
 use crate::core::{
     checksum::crc32c,
+    gpu::cuda::filters::WorkerFilters,
     memory::{try_capacity, try_copy},
     types::{BatoError, BlockType, Primer, TransformId, DEFLATE_EXPANSION},
 };
@@ -207,6 +208,7 @@ pub(crate) fn encode_segment(
     raw: &mut [u8],
     (descriptor, trials): (Descriptor, Trials),
     timing: Timing<'_>,
+    mut accelerator: Option<&mut WorkerFilters<'_>>,
 ) -> Result<(Vec<Chunk>, Coding), BatoError> {
     descriptor.validate()?;
     if raw.len() > descriptor.segment_bytes() {
@@ -221,7 +223,7 @@ pub(crate) fn encode_segment(
     }
     let x86 = timing.time(Step::TransformSelection, || x86::select(raw))?;
     let independent = timing.time(Step::FastCandidates, || {
-        fast::best(raw, x86.map(x86::Sites::transform))
+        fast::best(raw, x86.map(x86::Sites::transform), &mut accelerator)
     })?;
     let original_crc = crc32c(raw);
     let selected_filter = independent.transform;
@@ -304,7 +306,7 @@ pub(crate) fn encode_segment(
     {
         let inputs = transforms
             .iter()
-            .map(|&transform| filters::forward(raw, transform))
+            .map(|&transform| filters::forward_on(raw, transform, &mut accelerator))
             .collect::<Result<Vec<_>, _>>()?;
         let limit = winner.0;
         let shared = (raw.len() <= SNAPSHOT_BYTES
@@ -387,7 +389,7 @@ pub(crate) fn encode_segment(
     // avoids five additional full CM passes on every segment while testing
     // one promising representation that was previously CM-inaccessible.
     if filters::CANDIDATES.contains(&selected_filter) && min_frame < winner.0 {
-        let transformed = filters::forward(raw, selected_filter)?;
+        let transformed = filters::forward_on(raw, selected_filter, &mut accelerator)?;
         if let Some((cost, primer, mut chunks)) = model_candidate(
             &transformed,
             (descriptor, trials, descriptor.segment_bytes()),
@@ -495,6 +497,7 @@ pub(crate) fn decode_segment(
     (descriptor, max_output): (Descriptor, usize),
     coding: Coding,
     timing: Timing<'_>,
+    accelerator: Option<&mut WorkerFilters<'_>>,
 ) -> Result<Vec<u8>, BatoError> {
     descriptor.validate()?;
     if let Some(sites) = x86::Sites::of_container(coding.transform) {
@@ -531,7 +534,7 @@ pub(crate) fn decode_segment(
         decode_chunks(chunks, descriptor, max_output, (coding.primer, timing))?
     };
     timing.time(Step::InverseTransform, || {
-        filters::inverse(&mut output, coding.transform)
+        filters::inverse_on(&mut output, coding.transform, accelerator)
     })?;
     timing.time(Step::Checksum, || verify_chunks(chunks, &output))?;
     Ok(output)
@@ -790,6 +793,7 @@ mod tests {
                 primer: Primer::Read,
             },
             Timing::off(),
+            None,
         )
     }
     use sha2::{Digest, Sha256};
@@ -893,18 +897,25 @@ mod tests {
         raw.extend_from_slice(b"\x00 separator \xff");
         raw.extend_from_slice(include_bytes!("deflate/fixtures/l9.deflate"));
         let original = raw.clone();
-        let (chunks, coding) =
-            encode_segment(&mut raw, (descriptor, Trials::Parallel), Timing::off()).unwrap();
+        let (chunks, coding) = encode_segment(
+            &mut raw,
+            (descriptor, Trials::Parallel),
+            Timing::off(),
+            None,
+        )
+        .unwrap();
         assert_eq!(raw, original, "encoding restores its input");
         assert_eq!(coding.transform, TransformId::Deflate);
         let coded: usize = chunks.iter().map(|chunk| chunk.length as usize).sum();
         assert!(coded > original.len(), "chunks hold the inflated bytes");
         let decoded =
-            decode_segment(&chunks, (descriptor, 1 << 20), coding, Timing::off()).unwrap();
+            decode_segment(&chunks, (descriptor, 1 << 20), coding, Timing::off(), None).unwrap();
         assert_eq!(decoded, original);
         let mut damaged = chunks.clone();
         damaged[0].crc ^= 1;
-        assert!(decode_segment(&damaged, (descriptor, 1 << 20), coding, Timing::off()).is_err());
+        assert!(
+            decode_segment(&damaged, (descriptor, 1 << 20), coding, Timing::off(), None).is_err()
+        );
         let independent = Coding {
             transform: TransformId::Deflate,
             primer: Primer::Read,
@@ -915,9 +926,14 @@ mod tests {
             payload: vec![1, 2, 3],
             crc: crc32c(&[1, 2, 3]),
         }];
-        assert!(
-            decode_segment(&stored, (descriptor, 1 << 20), independent, Timing::off()).is_err()
-        );
+        assert!(decode_segment(
+            &stored,
+            (descriptor, 1 << 20),
+            independent,
+            Timing::off(),
+            None
+        )
+        .is_err());
     }
 
     #[test]
@@ -926,7 +942,7 @@ mod tests {
         let mut raw = b"catalogue metadata and recurring text\\n".repeat(128);
         raw.extend_from_slice(include_bytes!("deflate/fixtures/l6.deflate"));
         let original = raw.clone();
-        let independent = fast::best(&raw, None).unwrap().cost();
+        let independent = fast::best(&raw, None, &mut None).unwrap().cost();
         let raw_model = model_candidate(
             &raw,
             (descriptor, Trials::Sequential, descriptor.segment_bytes()),
@@ -937,8 +953,13 @@ mod tests {
         .unwrap()
         .0;
 
-        let (chunks, coding) =
-            encode_segment(&mut raw, (descriptor, Trials::Sequential), Timing::off()).unwrap();
+        let (chunks, coding) = encode_segment(
+            &mut raw,
+            (descriptor, Trials::Sequential),
+            Timing::off(),
+            None,
+        )
+        .unwrap();
         assert_eq!(raw, original, "input is unchanged after candidate trials");
         assert!(chunks_cost(&chunks) <= independent);
         assert!(chunks_cost(&chunks) <= raw_model);
@@ -947,7 +968,8 @@ mod tests {
                 &chunks,
                 (descriptor, descriptor.segment_bytes()),
                 coding,
-                Timing::off()
+                Timing::off(),
+                None
             )
             .unwrap(),
             original,
@@ -1018,6 +1040,7 @@ mod tests {
                 &mut raw.clone(),
                 (descriptor, Trials::Sequential),
                 Timing::off(),
+                None,
             )
             .unwrap()
         });
@@ -1037,6 +1060,7 @@ mod tests {
                 (descriptor, descriptor.segment_bytes()),
                 coding,
                 Timing::off(),
+                None,
             )
             .unwrap()
         });
@@ -1078,6 +1102,7 @@ mod tests {
                 (descriptor, descriptor.segment_bytes()),
                 coding,
                 Timing::off(),
+                None,
             )
         };
         assert!(matches!(

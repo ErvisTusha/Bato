@@ -45,6 +45,33 @@ def validate_case_records(cases, trials_by_case, expected_case_ids=None, complet
             raise ValueError(f'Case projection differs from committed trials: {case["case_id"]}')
 
 
+class InMemoryMeasurements:
+    """Keep cases and raw trials for a live comparison without writing reports."""
+
+    def __init__(self):
+        self._cases = {}
+        self._trials = {}
+
+    def save_case(self, run, record):
+        self._cases.setdefault(run, {})[record['case_id']] = record.copy()
+
+    def cases(self, run):
+        return [row.copy() for _, row in sorted(self._cases.get(run, {}).items())]
+
+    def save_trial(self, run, case, phase, number, record):
+        trials = self._trials.setdefault((run, case), {})
+        if trials.setdefault((phase, number), record.copy()) != record:
+            raise ValueError('Cannot overwrite an already accepted trial')
+
+    def trials(self, run, case):
+        return list(self._trials.get((run, case), {}).values())
+
+    def validate(self, run, expected_case_ids):
+        cases = self.cases(run)
+        trials = {case['case_id']: self.trials(run, case['case_id']) for case in cases}
+        validate_case_records(cases, trials, expected_case_ids, complete=True)
+
+
 class MeasurementStore:
     def __init__(self, path):
         self.path = Path(path)

@@ -127,6 +127,7 @@ class Codec:
     nncp_profile: str = "default"
     nncp_cuda: bool = False
     segment_size: int = 64 * 2**20
+    bato_compute: str | None = None
 
     @property
     def level(self):
@@ -138,7 +139,8 @@ class Codec:
         if self.identifier.startswith("bato"):
             return ["--segment-size", str(self.segment_size),
                     "--chunk-size", str(self.chunk_size), "--threads", str(self.threads),
-                    "--memory-budget", str(self.memory_budget), "--stats"]
+                    "--memory-budget", str(self.memory_budget), "--stats",
+                    *(["--compute", self.bato_compute] if self.bato_compute else [])]
         # CMIX has no universal compression level; NNCP profiles are explicitly
         # workload-specific rather than a truthful equivalent to PAQ -12L.
         if self.identifier == "cmix":
@@ -175,7 +177,7 @@ class Codec:
                 "directory_options": self.compression_options(True),
                 "directory_container": "native" if bato or self.identifier in {"zip", "rar", "7z", "kgb"} else "tar",
                 "backend": "bato-v1" if bato else "7z-zip" if self.identifier == "zip" and self.zip_backend == "7z" else self.identifier,
-                "compute": ("cuda" if self.nncp_cuda else "cpu") if self.identifier == "nncp" else None,
+                "compute": ("cuda" if self.nncp_cuda else "cpu") if self.identifier == "nncp" else self.bato_compute if bato else None,
                 "nncp_profile": self.nncp_profile if self.identifier == "nncp" else None,
                 "chunk_size": self.chunk_size if bato else None,
                 "segment_size": self.segment_size if bato else None,
@@ -373,7 +375,7 @@ class Codec:
 def create_codecs(binary, version, requested=None, only_bato=False, profile="high", threads=1,
                   bato_modes="cpu1", memory_budget=256 * 2**20,
                   chunk_size=256 * 1024, codec_tuning=None, nncp_profile="default", nncp_cuda=False,
-                  segment_size=64 * 2**20):
+                  segment_size=64 * 2**20, bato_compute=None):
     if not 2**16 <= segment_size <= 2**30 or segment_size & (segment_size - 1):
         raise ValueError("Bato segment size must be a power of two from 64 KiB to 1 GiB")
     if chunk_size < 4096 or chunk_size > 2**20 or chunk_size & (chunk_size - 1) or chunk_size > segment_size:
@@ -393,10 +395,11 @@ def create_codecs(binary, version, requested=None, only_bato=False, profile="hig
             for execution in modes:
                 count = 1 if execution == "cpu1" else threads
                 identifier = "bato-v1" if execution == "cpu1" else f"bato-v1-{execution}{count}"
-                codecs.append(Codec(identifier, f"Bato Rust ({execution}, {count} workers)", str(binary) if binary else None,
+                filter_label = f", {bato_compute} filters" if bato_compute else ""
+                codecs.append(Codec(identifier, f"Bato Rust ({execution}, {count} workers{filter_label})", str(binary) if binary else None,
                                     version or "unavailable", profile=profile, threads=count,
                                     memory_budget=memory_budget, chunk_size=chunk_size,
-                                    segment_size=segment_size))
+                                    segment_size=segment_size, bato_compute=bato_compute))
             continue
         if name == "zip" and tuning.get(name, {}).get("backend") == "7z":
             program = shutil.which("7zz") or shutil.which("7z")

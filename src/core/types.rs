@@ -31,6 +31,7 @@ pub enum BatoError {
     MemoryLimitExceeded { required: usize, limit: usize },
     AllocationFailed { bytes: usize },
     InvalidOptions(String),
+    Cuda(String),
     CorruptStream(String),
     UnknownBlockType(u8),
     UnknownTransformId(u8),
@@ -71,6 +72,7 @@ impl fmt::Display for BatoError {
             ),
             Self::AllocationFailed { bytes } => write!(f, "Unable to allocate {bytes} bytes"),
             Self::InvalidOptions(s) => write!(f, "Invalid options: {s}"),
+            Self::Cuda(reason) => write!(f, "CUDA byte filters: {reason}"),
             Self::CorruptStream(s) => write!(f, "Corrupted stream: {s}"),
             Self::UnknownBlockType(v) => write!(f, "Unknown block type: {v}"),
             Self::UnknownTransformId(v) => write!(f, "Unknown transform ID: {v}"),
@@ -103,6 +105,12 @@ impl From<io::Error> for BatoError {
 pub struct ExecutionStatsSnapshot {
     pub cpu_workers: usize,
     pub cpu_blocks: u64,
+    /// Successful CUDA kernel launches that produced archive filter output.
+    pub cuda_filter_dispatches: u64,
+    /// Input bytes processed by CUDA, counted once per filter.
+    pub cuda_filter_bytes: u64,
+    pub cuda_device: String,
+    pub cuda_fallback: String,
     pub estimated_host_memory: usize,
     /// Startup allowance, shared by the entire operation.
     pub memory_budget: usize,
@@ -137,10 +145,23 @@ impl ExecutionStats {
         f(&mut self.data.lock().unwrap())
     }
 }
+/// Where eligible byte filters run. Every setting produces identical archives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Compute {
+    /// Try CUDA on large batches and run on the CPU if unavailable or busy.
+    Auto,
+    /// Run all filters on the CPU.
+    #[default]
+    Cpu,
+    /// Require CUDA for supported batches. A device failure is returned.
+    Cuda,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ExecutionOptions {
     /// Worker threads; 0 uses all available CPUs.
     pub threads: usize,
+    pub compute: Compute,
     pub stats: std::sync::Arc<ExecutionStats>,
 }
 impl ExecutionOptions {

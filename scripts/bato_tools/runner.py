@@ -21,7 +21,7 @@ from .measurement import FAILURES, aggregate, base_record, measure_trial, run_st
 from .reporting import export, print_archive_summary
 from .resources import ResourceLimit, admit_disk, memory_state, resolve_memory_budget, proc_pids_match, configure_resources
 from .database import DEFAULT_DATABASE, database_path, prepare_database
-from .store import MeasurementStore, SCHEMA_VERSION, expected_case_ids
+from .store import InMemoryMeasurements, MeasurementStore, SCHEMA_VERSION, expected_case_ids
 from .workloads import (GENERATOR_VERSION, METADATA_POLICY, directory_workloads, discover, file_count,
                         identify, matches, payload_size, quick_sample, stress_workloads)
 
@@ -150,7 +150,9 @@ def host_measurement_lock():
         yield
 
 
-def _run_suite(args, codecs, tool_report):
+def _run_suite(args, codecs, tool_report, *, result_rows=None):
+    if result_rows is not None:
+        return _run_stored_suite(args, codecs, tool_report, InMemoryMeasurements(), result_rows=result_rows)
     destination = database_path(args)
     if destination == DEFAULT_DATABASE.resolve():
         prepare_database(destination)
@@ -162,7 +164,8 @@ def _run_suite(args, codecs, tool_report):
         store.close()
 
 
-def _run_stored_suite(args, codecs, tool_report, store):
+def _run_stored_suite(args, codecs, tool_report, store, *, result_rows=None):
+    persist = result_rows is None
     workloads,excluded,selection = select_workloads(args)
     output, scratch = Path(args.output_dir).resolve(), Path(args.scratch_dir).resolve()
     env = environment(scratch)
@@ -196,8 +199,9 @@ def _run_stored_suite(args, codecs, tool_report, store):
     metadata.update(status='running',exclusions=excluded,selection=selection,tool_preflight=tool_report,
                     effective_memory_budget=budget,resources_observed=memory_state())
     metadata.setdefault('baseline_references', {})
-    store.save_run(args.run_id,metadata)
-    atomic_json(run_dir/'workloads.json',workloads)
+    if persist:
+        store.save_run(args.run_id,metadata)
+        atomic_json(run_dir/'workloads.json',workloads)
     records = {row['case_id']:row for row in store.cases(args.run_id)}
     plans = []
     for item in workloads:
@@ -223,10 +227,14 @@ def _run_stored_suite(args, codecs, tool_report, store):
                 records[base['case_id']] = case
                 plans.append((item,track,codec,base['case_id']))
 
-    store.save_run(args.run_id,metadata)
+    if persist:
+        store.save_run(args.run_id,metadata)
 
     def project():
         cases = store.cases(args.run_id)
+        if not persist:
+            result_rows[:] = [dict(row, run_id=args.run_id) for row in cases]
+            return
         observations = [dict(t,run_id=args.run_id,case_id=row['case_id']) for row in cases for t in store.trials(args.run_id,row['case_id'])]
         export(run_dir,cases,metadata,observations)
         checkpoint = getattr(args, 'checkpoint_dir', None)
@@ -252,6 +260,8 @@ def _run_stored_suite(args, codecs, tool_report, store):
         case = aggregate(records[case_id],store.trials(args.run_id,case_id))
         records[case_id] = case
         store.save_case(args.run_id,case)
+        if not persist:
+            return
         with (run_dir/'trials.jsonl').open('a',encoding='utf-8') as journal:
             journal.write(json.dumps(dict(observation,run_id=args.run_id,case_id=case_id),sort_keys=True)+'\n')
             journal.flush()
@@ -278,7 +288,8 @@ def _run_stored_suite(args, codecs, tool_report, store):
                         continue
                     staged = {**item,'path':str(source),'snapshot':prepared['snapshot'],
                               'tar_path':str(tar_path) if tar_path else None,'tar_snapshot':prepared.get('tar_snapshot')}
-                    store.save_workload(args.run_id,{**item,'snapshot':prepared['snapshot'],'tar_snapshot':prepared.get('tar_snapshot')})
+                    if persist:
+                        store.save_workload(args.run_id,{**item,'snapshot':prepared['snapshot'],'tar_snapshot':prepared.get('tar_snapshot')})
                     for _,track,codec,case_id in active:
                         row = records[case_id]
                         row.update(tar_packaging_s=prepared.get('tar_packaging_s'), preparation_s=prepared.get('phase_elapsed_s'), input_sha256=prepared['snapshot']['sha256'],
@@ -328,15 +339,22 @@ def _run_stored_suite(args, codecs, tool_report, store):
         metadata.update(status='failed',error=str(error),finished_at=utc_now())
         raise
     finally:
-        store.save_run(args.run_id,metadata)
+        if persist:
+            store.save_run(args.run_id,metadata)
         project()
-    atomic_json(output/'latest.json',{'run_id':args.run_id,'path':str(run_dir),'status':metadata['status']})
-    print_archive_summary(final)
-    print(f'Results: {run_dir}')
+    if persist:
+        atomic_json(output/'latest.json',{'run_id':args.run_id,'path':str(run_dir),'status':metadata['status']})
+        print_archive_summary(final)
+        print(f'Results: {run_dir}')
     return 0 if metadata['status']=='complete' else 1
 
 
-def run_suite(args):
+def run_suite(args, *, result_rows=None):
+    """Measure the suite and optionally return live rows without saving results."""
+    if result_rows is not None and any(getattr(args, name, None) for name in (
+        'resume', 'ensure_competitors', 'checkpoint_dir', 'keep_archives',
+    )):
+        raise ValueError('Live results cannot use resume, baseline caching, checkpoints or archive retention')
     configure_resources(args)
     original = os.sched_getaffinity(0) if hasattr(os, 'sched_getaffinity') else None
     count, threads = getattr(args, 'cpu_limit', 1), getattr(args, 'threads', 1)
@@ -349,13 +367,13 @@ def run_suite(args):
     elif count != 1:
         raise ValueError('This platform cannot enforce equal CPU allocations')
     try:
-        return _run_allocated_suite(args)
+        return _run_allocated_suite(args, result_rows=result_rows)
     finally:
         if original is not None:
             os.sched_setaffinity(0, original)
 
 
-def _run_allocated_suite(args):
+def _run_allocated_suite(args, *, result_rows=None):
     if args.list_workloads:
         workloads,excluded,selection = select_workloads(args)
         print(json.dumps({'schema_version':4,'workloads':workloads,'exclusions':excluded,'selection':selection},indent=2))
@@ -372,6 +390,7 @@ def _run_allocated_suite(args):
                 memory_budget=getattr(args,'bato_memory_budget',256 * 2**20),
                 chunk_size=getattr(args,'bato_chunk_size',256 * 1024),
                 segment_size=getattr(args,'bato_segment_size',64 * 2**20),
+                bato_compute=getattr(args,'bato_compute',None),
                 codec_tuning=json.loads(Path(args.codec_tuning).read_text()) if getattr(args,'codec_tuning',None) else None,
                 nncp_profile=getattr(args,'nncp_profile','default'),nncp_cuda=getattr(args,'nncp_cuda',False))
         finally:
@@ -405,10 +424,11 @@ def _run_allocated_suite(args):
             previous, _ = load_run(output,args.run_id,database_path(args))
             if previous.get('schema_version')!=4:
                 raise ValueError('Resume requires schema v4 and its canonical measurements.sqlite3; legacy runs are preserved')
-        run_dir.mkdir(parents=True,exist_ok=True)
+        if result_rows is None:
+            run_dir.mkdir(parents=True,exist_ok=True)
         Path(args.scratch_dir).mkdir(parents=True,exist_ok=True)
         with contextlib.ExitStack() as stack:
-            locks = [(run_dir/'run.lock',fcntl.LOCK_EX)]
+            locks = [(run_dir/'run.lock',fcntl.LOCK_EX)] if result_rows is None else []
             if args.suite!='stress':
                 locks.append((root/'.corpus.lock',fcntl.LOCK_SH))
             for path,mode in locks:
@@ -417,4 +437,4 @@ def _run_allocated_suite(args):
                     fcntl.flock(stream,mode|fcntl.LOCK_NB)
                 except BlockingIOError as error:
                     raise ValueError('Corpus is being modified or this run is already active') from error
-            return _run_suite(args,codecs,report)
+            return _run_suite(args,codecs,report,result_rows=result_rows)
