@@ -2,6 +2,7 @@
 //! Vulkan, Metal and Direct3D 12 use one shared Rust implementation.
 
 use super::super::super::GpuError;
+#[cfg(feature = "cuda")]
 use std::fmt;
 use wgpu::util::DeviceExt;
 
@@ -18,6 +19,7 @@ pub struct Gpu {
     pub(in crate::core::gpu) info: wgpu::AdapterInfo,
 }
 
+#[cfg(feature = "cuda")]
 /// A compiled compute shader with its buffers bound.
 pub(in crate::core::gpu) struct Kernel {
     pub(in crate::core::gpu) pipeline: wgpu::ComputePipeline,
@@ -126,6 +128,7 @@ impl Gpu {
     }
 
     /// Runs `build` and returns a validation error it raised on the device.
+    #[cfg(feature = "cuda")]
     pub(in crate::core::gpu) fn validated<T>(&self, build: impl FnOnce() -> T) -> Result<T, GpuError> {
         let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let built = build();
@@ -156,6 +159,7 @@ impl Gpu {
     }
 
     /// Compiles `shader` and binds `buffers` to its bindings 0, 1, 2, ...
+    #[cfg(feature = "cuda")]
     pub(in crate::core::gpu) fn kernel(&self, shader: &str, buffers: &[&wgpu::Buffer]) -> Kernel {
         let module = self
             .device
@@ -190,6 +194,7 @@ impl Gpu {
     }
 
     /// Commands that run `groups` workgroups of `kernel`, not yet submitted.
+    #[cfg(feature = "cuda")]
     pub(in crate::core::gpu) fn pass(&self, kernel: &Kernel, groups: u32) -> wgpu::CommandEncoder {
         let mut encoder = self
             .device
@@ -205,6 +210,7 @@ impl Gpu {
 
     /// Submits `encoder` followed by a copy of `source` to `staging`, waits
     /// for all submitted work and returns the copied values.
+    #[cfg(feature = "cuda")]
     pub(in crate::core::gpu) fn read(
         &self,
         mut encoder: wgpu::CommandEncoder,
