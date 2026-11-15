@@ -336,7 +336,7 @@ mod tests {
 
     #[test]
     fn cuda_source_repeats_the_kernel_constants() {
-        let source = include_str!("cuda/kernels.cu");
+        let source = include_str!("../../../native/cuda/kernels.cu");
         for constant in [
             format!("#define CELL_ONE {CELL_ONE}u"),
             format!("#define RATE_SHIFT {RATE_SHIFT}"),
