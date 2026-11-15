@@ -466,9 +466,7 @@ impl Directory {
         #[cfg(windows)]
         {
             use std::os::windows::ffi::OsStrExt;
-            use windows_sys::Win32::Storage::FileSystem::{
-                MoveFileExW, MOVEFILE_REPLACE_EXISTING,
-            };
+            use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING};
             // Windows cannot reliably unlink an open or recently closed
             // file created by hard_link. MoveFileExW publishes it in one
             // operation and, with flags=0, refuses an existing destination.
