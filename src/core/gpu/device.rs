@@ -101,8 +101,18 @@ impl Devices {
             Vec::new()
         };
 
-        #[cfg(feature = "wgpu")]
+        #[cfg(all(feature = "cuda", feature = "wgpu"))]
         let mut wgpu_adapters = if matches!(compute, Compute::Auto | Compute::Wgpu) {
+            Gpu::adapters()
+                .into_iter()
+                .filter(Gpu::hardware_adapter)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+
+        #[cfg(all(not(feature = "cuda"), feature = "wgpu"))]
+        let wgpu_adapters = if matches!(compute, Compute::Auto | Compute::Wgpu) {
             Gpu::adapters()
                 .into_iter()
                 .filter(Gpu::hardware_adapter)
