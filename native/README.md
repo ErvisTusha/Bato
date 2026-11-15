@@ -22,9 +22,11 @@ All GPU implementations are feature-isolated. The Rust code lives under
 kernels live under `native/{cuda,hip,level_zero,metal}/`.
 Device scheduling is common to all backends.
 
-`cargo build --release` selects `cuda` and `wgpu` by default; the
-`gpu` umbrella feature is a backwards-compatible alias. Native features
-(`hip`, `level-zero`, `metal`) do not implicitly enable CUDA or wgpu.
+`cargo build --release` now selects **all five GPU features**
+(`cuda,hip,level-zero,metal,wgpu`) plus CPU and uses `--compute auto` by
+default. The `gpu` umbrella feature remains an alias for CUDA + wgpu.
+Features are independently selectable for developer/QA testing; end users
+use the same executable for every GPU brand on their OS/architecture.
 Build a backend without the others by passing `--no-default-features`.
 For cross-vendor fallback on the same binary, list explicit features such as
 `--no-default-features --features hip,wgpu`.
@@ -70,6 +72,72 @@ required for native-only builds. Runtime fallback uses only the backends
 actually compiled into the binary. Native toolchain support
 is currently intended for Linux HIP/Intel oneAPI and macOS Metal; Windows GPU
 users should use CUDA or wgpu until vendor-specific native builds are tested.
+
+## One executable for all GPU brands
+
+Bato ships one **platform-specific executable** (`bato` or `bato.exe`) for
+all supported GPU manufacturers and the CPU. A Linux executable does not run
+on Windows or macOS, and x64/ARM64 remain separate CPU architectures.
+
+All five Rust backend interfaces are compiled by default. CUDA's PTX and wgpu
+shaders are embedded in Rust already. Native SDK libraries for AMD HIP,
+Intel Level Zero, and Apple Metal can be **embedded as bytes in the same
+executable**: Rust extracts them into a private temporary directory for
+dynamic loading and removes them after the native module unloads. No separate
+GPU plugin download or installation step is needed for such a release.
+
+The system still needs the device's compatible GPU driver. Vendor SDK
+runtime dependencies (e.g. ROCm or Intel oneAPI components) may also be
+needed by native libraries; if unavailable, Bato auto-falls back to wgpu
+(Vulkan/D3D12/Metal) or CPU. This is not a claim that the GPU driver or the
+full vendor runtime is embedded.
+
+### Linux all-native release (SDK-equipped build machine)
+
+```bash
+bash scripts/build_native_backends.sh hip
+bash scripts/build_native_backends.sh level-zero
+BATO_BUNDLE_HIP_LIBRARY="$PWD/target/native/libbato_hip.so" \
+BATO_BUNDLE_LEVEL_ZERO_LIBRARY="$PWD/target/native/libbato_level_zero.so" \
+BATO_REQUIRE_BUNDLED_NATIVE=1 cargo build --release --locked --bin bato
+```
+
+### Apple Silicon / macOS release
+
+```bash
+bash scripts/build_native_backends.sh metal
+BATO_BUNDLE_METAL_LIBRARY="$PWD/target/native/libbato_metal.dylib" \
+BATO_REQUIRE_BUNDLED_NATIVE=1 cargo build --release --locked --bin bato
+```
+
+The strict `BATO_REQUIRE_BUNDLED_NATIVE=1` flag rejects builds missing
+the platform's required native plugins. On Linux and Windows it requires
+HIP and Level Zero; on macOS it requires direct Metal. For Windows,
+native vendor SDK plugins must first be built with a compatible Windows
+toolchain; the supplied Linux build script does not produce DLLs.
+
+A normal `cargo build --release --locked` works without vendor SDKs:
+CUDA, wgpu, all native plugin loaders, and CPU are included. Windows/Linux
+GitHub-hosted universal artifacts currently do **not** embed HIP/Level Zero,
+because those hosted runners lack the required SDKs; AMD and Intel run through
+wgpu instead. macOS universal artifacts **do** build and embed Metal through
+Xcode. Release packaging will not falsely label an SDK-free binary
+"all-native".
+
+The `bato --help` output lists which GPU backends were compiled and which
+native vendor libraries were actually bundled. Runtime `--stats` shows
+which devices really executed filters.
+
+### Universal benchmark
+
+```bash
+python3 scripts/benchmark_suite.py --only-bato --bato-compute auto --bato-bin target/release/bato
+python3 scripts/benchmark_bato_table.py --branch-bin target/release/bato
+```
+
+Both benchmarks use `auto` by default for current builds. The table
+also measures a CPU baseline and reports CUDA/wgpu/native launch counts.
+GPU discovery does not guarantee a speedup, particularly for small segments.
 
 ## Safety and performance
 
