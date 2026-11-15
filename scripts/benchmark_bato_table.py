@@ -176,6 +176,8 @@ def run_case(workload, name, build, output, args, resources):
         command.extend(['--bato-compute', 'auto'])
     elif build.get('gpu_compute_modes'):
         command.extend(['--bato-compute', 'cpu'])
+    else:
+        command.extend(['--bato-compute', 'legacy'])
     rows = []
     diagnostics = io.StringIO()
     with contextlib.redirect_stdout(diagnostics), contextlib.redirect_stderr(diagnostics):
