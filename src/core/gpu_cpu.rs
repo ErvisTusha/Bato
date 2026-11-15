@@ -7,7 +7,9 @@ pub(crate) mod filters {
 
     /// No device discovery or memory allocation in CPU-only builds.
     #[derive(Default)]
-    pub(crate) struct FilterPool;
+    pub(crate) struct FilterPool {
+        _private: (),
+    }
 
     #[derive(Clone, Copy)]
     pub(crate) enum Direction {
@@ -62,7 +64,7 @@ pub(crate) mod filters {
 
         #[test]
         fn auto_and_cpu_use_the_existing_cpu_filters() {
-            let pool = FilterPool;
+            let pool = FilterPool::default();
             let stats = ExecutionStats::default();
             for compute in [Compute::Auto, Compute::Cpu] {
                 let mut worker = WorkerFilters::new(&pool, (compute, &stats), 0);
@@ -75,7 +77,7 @@ pub(crate) mod filters {
 
         #[test]
         fn explicit_gpu_requests_are_rejected_clearly() {
-            let pool = FilterPool;
+            let pool = FilterPool::default();
             let stats = ExecutionStats::default();
             for compute in [
                 Compute::Cuda,
