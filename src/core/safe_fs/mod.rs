@@ -463,12 +463,39 @@ impl Directory {
             },
         )
         .map_err(os_error)?;
-        #[cfg(not(unix))]
-        if overwrite == Overwrite::Replace {
-            fs::rename(source.path.join(old), self.path.join(name))?;
-        } else {
-            fs::hard_link(source.path.join(old), self.path.join(name))?;
-            fs::remove_file(source.path.join(old))?;
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            use windows_sys::Win32::Storage::FileSystem::{
+                MoveFileExW, MOVEFILE_REPLACE_EXISTING,
+            };
+            // Windows cannot reliably unlink an open or recently closed
+            // file created by hard_link. MoveFileExW publishes it in one
+            // operation and, with flags=0, refuses an existing destination.
+            // Both directory ancestor chains remain pinned and verified.
+            let old: Vec<u16> = source
+                .path
+                .join(old)
+                .as_os_str()
+                .encode_wide()
+                .chain([0])
+                .collect();
+            let new: Vec<u16> = self
+                .path
+                .join(name)
+                .as_os_str()
+                .encode_wide()
+                .chain([0])
+                .collect();
+            let flags = if overwrite == Overwrite::Replace {
+                MOVEFILE_REPLACE_EXISTING
+            } else {
+                0
+            };
+            // SAFETY: UTF-16 buffers are zero terminated, valid for the call.
+            if unsafe { MoveFileExW(old.as_ptr(), new.as_ptr(), flags) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
         }
         Ok(())
     }
