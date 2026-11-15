@@ -15,7 +15,25 @@ usage() {
 build_hip() {
   command -v hipcc >/dev/null || { echo "hipcc (ROCm/HIP SDK) is required" >&2; exit 1; }
   echo "Building AMD HIP plugin"
-  hipcc -O3 -std=c++17 -fPIC -shared "$ROOT/native/hip/filters.hip" \
+  # Multiple GPU target code objects can live in the same shared library;
+  # specify BATO_HIP_OFFLOAD_ARCHS=gfx1100,gfx1101,... on SDK build hosts.
+  # Unsupported architectures must fail the build rather than being silently
+  # omitted from a release advertised as all-native.
+  local -a flags=(-O3 -std=c++17 -fPIC -shared -x hip)
+  if [[ -n "${BATO_HIP_OFFLOAD_ARCHS:-}" ]]; then
+    local -a targets
+    IFS=',; ' read -ra targets <<< "$BATO_HIP_OFFLOAD_ARCHS"
+    local arch
+    for arch in "${targets[@]}"; do
+      [[ -n "$arch" ]] || continue
+      [[ "$arch" =~ ^gfx[0-9a-f]+$ ]] || {
+        echo "Invalid HIP offload target: $arch" >&2
+        exit 2
+      }
+      flags+=("--offload-arch=$arch")
+    done
+  fi
+  hipcc "${flags[@]}" "$ROOT/native/hip/filters.hip" \
     -o "$OUT/libbato_hip.so"
 }
 
