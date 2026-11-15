@@ -10,6 +10,11 @@ readme = "README.md"
 keywords = ["compression", "lossless", "context-mixing", "rust"]
 categories = ["compression", "algorithms"]
 
+[features]
+# Preserve existing GPU-enabled builds by default; allow a pure CPU build.
+default = ["gpu"]
+gpu = ["dep:wgpu", "dep:pollster", "dep:libloading"]
+
 [dependencies]
 sha2 = "0.10"
 tempfile = "3"
@@ -18,9 +23,9 @@ same-file = "1"
 serde_json = "1"
 age = { version = "0.11.1", default-features = false }
 reed-solomon-erasure = "6"
-wgpu = { version = "30", default-features = false, features = ["vulkan", "metal", "dx12", "wgsl"] }
-pollster = "1.0.1"
-libloading = "0.8"
+wgpu = { version = "30", default-features = false, features = ["vulkan", "metal", "dx12", "wgsl"], optional = true }
+pollster = { version = "1.0.1", optional = true }
+libloading = { version = "0.8", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -28,6 +33,11 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_SystemInformation", "Win32_System_Threading"] }
 
+
+[[example]]
+name = "gpu_probe"
+path = "examples/gpu_probe.rs"
+required-features = ["gpu"]
 
 [[bin]]
 name = "bato"
