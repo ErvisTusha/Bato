@@ -123,8 +123,9 @@ fn bundled_library_path(
     // simultaneous archive workers cannot race to write the same plugin.
     let path = dir.path().join(kind.filename());
     if !path.exists() {
-        fs::write(&path, data)
-            .map_err(|error| GpuError::Device(format!("cannot extract embedded GPU library: {error}")))?;
+        fs::write(&path, data).map_err(|error| {
+            GpuError::Device(format!("cannot extract embedded GPU library: {error}"))
+        })?;
     }
     Ok(Some((path, dir)))
 }
