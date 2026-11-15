@@ -10,6 +10,7 @@
 pub mod cuda;
 mod device;
 pub(crate) mod filters;
+mod scheduler;
 pub mod matvec;
 pub mod streams;
 mod wgpu_filters;
