@@ -8,6 +8,7 @@
 //! The matrix-vector and stream kernels are used for standalone measurements.
 
 pub mod cuda;
+mod device;
 pub(crate) mod filters;
 pub mod matvec;
 pub mod streams;
