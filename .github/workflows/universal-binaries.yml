@@ -51,11 +51,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Verify format and enabled default backend feature set
         shell: bash
         run: |
           cargo fmt --all -- --check
-          python3 scripts/check_universal_features.py
+          python scripts/check_universal_features.py
       - name: Build the native Metal plugin for embedding (macOS)
         if: matrix.metal
         shell: bash
@@ -79,7 +82,7 @@ jobs:
       - name: Validate lossless archive round trip
         shell: bash
         run: |
-          python3 scripts/run_tests.py --bato-bin "target/release/${{ matrix.executable }}" --timeout 180
+          python scripts/run_tests.py --bato-bin "target/release/${{ matrix.executable }}" --timeout 180
       - name: Upload ONE executable for this OS/architecture (not per GPU)
         uses: actions/upload-artifact@v4
         with:
