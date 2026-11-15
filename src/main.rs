@@ -115,7 +115,7 @@ fn help() {
         VERSION_MINOR
     );
     eprintln!("Usage: bato [OPTIONS] [FILE]");
-    eprintln!("Options: -c -d -t -i archive extract -o PATH -f --segment-size BYTES --chunk-size BYTES --threads N --compute auto|cpu|cuda|wgpu --memory-budget auto|BYTES --stats --timing");
+    eprintln!("Options: -c -d -t -i archive extract -o PATH -f --segment-size BYTES --chunk-size BYTES --threads N --compute auto|cpu|cuda|hip|level-zero|metal|wgpu --memory-budget auto|BYTES --stats --timing");
     eprintln!("Archive commands: archive DIRECTORY, extract ARCHIVE [MEMBER...], add ARCHIVE PATH..., remove ARCHIVE MEMBER...");
     eprintln!("Archive options: --split-size BYTES --password-file FILE --protect MEMBER (repeatable) --public-only");
     eprintln!("Split recovery: archive --split-size BYTES [--parity | --parity-volumes N], repair-split ARCHIVE -o PATH");
@@ -226,7 +226,10 @@ fn parse(args: &[OsString]) -> Option<Command> {
                     Some("cpu") => Compute::Cpu,
                     Some("cuda") => Compute::Cuda,
                     Some("wgpu") => Compute::Wgpu,
-                    _ => die("compute must be auto, cpu, cuda or wgpu"),
+                    Some("hip") => Compute::Hip,
+                    Some("level-zero") => Compute::LevelZero,
+                    Some("metal") => Compute::Metal,
+                    _ => die("compute must be auto, cpu, cuda, hip, level-zero, metal or wgpu"),
                 }
             }
             "--memory-budget" => {
