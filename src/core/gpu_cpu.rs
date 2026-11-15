@@ -49,6 +49,9 @@ pub(crate) mod filters {
                 Compute::Wgpu => Err(BatoError::Wgpu(
                     "Bato was built without GPU support; rebuild with --features gpu".into(),
                 )),
+                Compute::Hip | Compute::LevelZero | Compute::Metal => Err(BatoError::Native(
+                    "Bato was built without native GPU support".into(),
+                )),
             }
         }
     }
@@ -74,7 +77,7 @@ pub(crate) mod filters {
         fn explicit_gpu_requests_are_rejected_clearly() {
             let pool = FilterPool;
             let stats = ExecutionStats::default();
-            for compute in [Compute::Cuda, Compute::Wgpu] {
+            for compute in [Compute::Cuda, Compute::Wgpu, Compute::Hip, Compute::LevelZero, Compute::Metal] {
                 let mut worker = WorkerFilters::new(&pool, (compute, &stats), 0);
                 assert!(worker
                     .run(&[1, 2, 3], TransformId::Delta1, Direction::Forward)
