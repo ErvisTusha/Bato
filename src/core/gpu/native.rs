@@ -8,7 +8,7 @@
 use super::{filters::Direction, GpuError};
 use crate::core::{cm::filters, types::TransformId};
 use libloading::Library;
-use std::{ffi::OsString, path::PathBuf};
+use std::path::PathBuf;
 
 const ABI_VERSION: u32 = 1;
 type VersionFn = unsafe extern "C" fn() -> u32;
@@ -124,7 +124,8 @@ impl Plugin {
         transform: TransformId,
         direction: Direction,
     ) -> Result<Vec<u8>, GpuError> {
-        let mut output = vec![0; input.len()];
+        let mut output = crate::core::memory::try_filled(input.len(), 0u8)
+            .map_err(|error| GpuError::Execution(error.to_string()))?;
         let inverse = u32::from(matches!(direction, Direction::Inverse));
         // SAFETY: input/output buffers remain valid and disjoint for the
         // entire synchronous call; ordinal is within device_count; filter
@@ -150,7 +151,8 @@ impl Plugin {
         let reference = match direction {
             Direction::Forward => filters::forward(input, transform),
             Direction::Inverse => {
-                let mut data = input.to_vec();
+                let mut data = crate::core::memory::try_copy(input)
+                    .map_err(|error| GpuError::Execution(error.to_string()))?;
                 filters::inverse(&mut data, transform).map(|()| data)
             }
         }
@@ -202,7 +204,7 @@ impl WorkerNative {
             .sum::<usize>();
         if total == 0 {
             return if selected.is_some() {
-                Err(GpuError::Device(self.errors.join("; ").to_string()))
+                Err(GpuError::Device(self.errors.join("; ")))
             } else {
                 Ok(None)
             };
