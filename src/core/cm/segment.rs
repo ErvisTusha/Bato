@@ -100,12 +100,31 @@ impl Snapshot {
     }
 }
 
-/// Whether the encoder may run its independent model trials on two threads.
-/// The archive is the same either way; only the time differs.
+/// Whether the encoder may run its independent model trials on several
+/// threads. The archive is the same either way; only the time differs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Trials {
     Sequential,
-    Parallel,
+    /// `reservations` is how many worker memory reservations the segment may
+    /// spread its concurrent models over: its own, plus those of workers that
+    /// will never receive a job because this is the stream's last segment.
+    Parallel {
+        reservations: usize,
+    },
+}
+
+impl Trials {
+    fn is_parallel(self) -> bool {
+        matches!(self, Trials::Parallel { .. })
+    }
+
+    /// Worker reservations available to this segment's concurrent models.
+    fn reservations(self) -> usize {
+        match self {
+            Trials::Sequential => 1,
+            Trials::Parallel { reservations } => reservations,
+        }
+    }
 }
 
 /// Which side of the codec a worker serves; decoding never builds the
@@ -190,15 +209,20 @@ pub(crate) fn parallel_trials_fit(descriptor: Descriptor) -> bool {
     reserved >= required
 }
 
-/// Whether `models` predictors for inputs of `length` bytes fit in a worker's
-/// reservation at once, each with its history and output.
-fn concurrent_models_fit(descriptor: Descriptor, length: usize, models: usize) -> bool {
+/// Whether `models` predictors for inputs of `length` bytes fit in the
+/// segment's `reservations` worker reservations at once, each with its
+/// history and output.
+fn concurrent_models_fit(
+    descriptor: Descriptor,
+    length: usize,
+    (models, reservations): (usize, usize),
+) -> bool {
     let Ok(reserved) = memory_required(descriptor, Direction::Encode) else {
         return false;
     };
     let per_model = predictor::memory_required(length + PRIMER.len(), descriptor.table_log2)
         .saturating_add(3 * length + PRIMER.len() + WORKER_SLACK);
-    reserved >= models.saturating_mul(per_model)
+    reserved.saturating_mul(reservations) >= models.saturating_mul(per_model)
 }
 
 /// Encodes one segment, first applying the reversible x86 address transform
@@ -304,10 +328,11 @@ pub(crate) fn encode_segment(
         .chain(filter)
         .chain([TransformId::None])
         .collect();
-    if trials == Trials::Parallel
+    let reservations = trials.reservations();
+    if trials.is_parallel()
         && transforms.len() > 1
         && min_frame < winner.0
-        && concurrent_models_fit(descriptor, raw.len(), 2 * transforms.len())
+        && concurrent_models_fit(descriptor, raw.len(), (2 * transforms.len(), reservations))
     {
         let inputs = transforms
             .iter()
@@ -315,7 +340,11 @@ pub(crate) fn encode_segment(
             .collect::<Result<Vec<_>, _>>()?;
         let limit = winner.0;
         let shared = (raw.len() <= SNAPSHOT_BYTES
-            && concurrent_models_fit(descriptor, raw.len(), 2 * transforms.len() + 1))
+            && concurrent_models_fit(
+                descriptor,
+                raw.len(),
+                (2 * transforms.len() + 1, reservations),
+            ))
         .then(|| {
             let total = PRIMER.len() + raw.len();
             Predictor::new(total, descriptor.table_log2, Dispatch::Native).map(|mut model| {
@@ -359,7 +388,7 @@ pub(crate) fn encode_segment(
     // Two or more primed candidates of this length follow: train once.
     let mut snapshot = Snapshot::new(
         raw.len() <= SNAPSHOT_BYTES
-            && concurrent_models_fit(descriptor, raw.len(), 2)
+            && concurrent_models_fit(descriptor, raw.len(), (2, reservations))
             && (x86.is_some() || filters::CANDIDATES.contains(&selected_filter)),
     );
     if min_frame < winner.0 {
@@ -461,7 +490,7 @@ fn model_candidate(
     };
     let outcomes: Vec<Option<(usize, Primer, Vec<Chunk>)>> = if input.len() > UNPRIMED_TRIAL_BYTES {
         vec![run(Primer::Read, limit, Some(snapshot))?]
-    } else if trials == Trials::Parallel {
+    } else if trials.is_parallel() {
         let (primed, unprimed) = std::thread::scope(|scope| {
             let unprimed = scope.spawn(|| run(Primer::Skipped, limit, None));
             (run(Primer::Read, limit, Some(snapshot)), unprimed.join())
@@ -904,7 +933,7 @@ mod tests {
         let original = raw.clone();
         let (chunks, coding) = encode_segment(
             &mut raw,
-            (descriptor, Trials::Parallel),
+            (descriptor, Trials::Parallel { reservations: 1 }),
             Timing::off(),
             None,
         )

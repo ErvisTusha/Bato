@@ -234,9 +234,9 @@ impl Pool {
     /// Two trials only run concurrently when the normal worker reservation
     /// covers both full predictor states. Otherwise the same compression
     /// candidates run sequentially with no extra memory requirement.
-    pub(crate) fn trials(&self) -> Trials {
+    pub(crate) fn trials(&self, reservations: usize) -> Trials {
         if self.capacity() > 1 && self.parallel_trials_fit {
-            Trials::Parallel
+            Trials::Parallel { reservations }
         } else {
             Trials::Sequential
         }
@@ -251,6 +251,20 @@ impl Pool {
             return Err(BatoError::CorruptStream("worker capacity exceeded".into()));
         }
         self.host.reserve(self.job_memory)
+    }
+
+    /// For the stream's last segment: grows `lease` by the reservations of
+    /// every worker that will never receive a job, so the segment's trials may
+    /// use their memory. Returns how many reservations the lease now covers.
+    /// Lending is opportunistic: if the budget cannot cover it, the segment
+    /// keeps its own single reservation.
+    pub(crate) fn lend_idle_workers(&self, lease: &mut MemoryLease) -> usize {
+        let idle = self.capacity().saturating_sub(self.outstanding() + 1);
+        let total = self.job_memory.saturating_mul(1 + idle);
+        match lease.grow(total) {
+            Ok(()) => 1 + idle,
+            Err(_) => 1, // The extra memory is optional; trials just run narrower.
+        }
     }
 
     pub fn submit(&mut self, job: Work, lease: MemoryLease) -> Result<(), BatoError> {
@@ -404,5 +418,29 @@ mod tests {
             assert_eq!(original.length as usize, raw.len());
         }
         assert_eq!(pool.outstanding(), 0);
+    }
+
+    #[test]
+    fn last_segment_borrows_only_idle_worker_reservations() {
+        let options = ExecutionOptions {
+            threads: 3,
+            ..Default::default()
+        };
+        let host = HostBudget::new(MemoryBudget::Bytes(usize::MAX / 2), &options.stats).unwrap();
+        let mut pool = Pool::new((descriptor(), Direction::Encode), host, &options).unwrap();
+        let mut sole = pool.prepare_job().unwrap();
+        assert_eq!(pool.lend_idle_workers(&mut sole), 3);
+        let first = pool.prepare_job().unwrap();
+        pool.submit(
+            Work::Encode {
+                raw: vec![1; 1000],
+                descriptor: descriptor(),
+                trials: Trials::Sequential,
+            },
+            first,
+        )
+        .unwrap();
+        let mut second = pool.prepare_job().unwrap();
+        assert_eq!(pool.lend_idle_workers(&mut second), 2);
     }
 }

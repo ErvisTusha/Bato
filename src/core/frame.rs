@@ -359,13 +359,19 @@ fn encode_segments<R: Read, W: Write>(
     let mut ended = false;
     loop {
         while !ended && pool.outstanding() < pool.capacity() {
-            let lease = pool.prepare_job()?;
+            let mut lease = pool.prepare_job()?;
             let raw = read_segment(r, descriptor)?;
             if raw.is_empty() {
                 ended = true;
                 break;
             }
-            let trials = pool.trials();
+            // A short segment is the last: no later job needs the idle workers.
+            let reservations = if raw.len() < descriptor.segment_bytes() {
+                pool.lend_idle_workers(&mut lease)
+            } else {
+                1
+            };
+            let trials = pool.trials(reservations);
             pool.submit(
                 Work::Encode {
                     raw,
