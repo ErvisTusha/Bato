@@ -35,13 +35,22 @@ cargo build --release --locked                           # Existing GPU-capable 
 cargo build --release --locked --no-default-features     # Pure CPU build, no GPU dependencies
 ```
 
-The `gpu` Cargo feature is enabled by default and contains the existing
-NVIDIA CUDA and cross-platform wgpu filter implementations. The CPU-only
-build retains the same archive format and deterministic CPU transforms.
-In a CPU-only build, `--compute auto` and `--compute cpu` use the CPU;
-explicit `--compute cuda` or `--compute wgpu` reports an unavailable
-backend rather than silently ignoring the request. Dedicated native AMD
-HIP, Intel Level Zero and direct Metal backends are **not implemented** yet.
+CUDA and wgpu are independently enabled Cargo features, both selected by
+default. The legacy `gpu` feature remains as an alias for both. For a
+single-backend or CPU-only build, use `--no-default-features`:
+
+```bash
+cargo build --release --locked --no-default-features --features cuda
+cargo build --release --locked --no-default-features --features wgpu
+cargo build --release --locked --no-default-features --features hip
+cargo build --release --locked --no-default-features --features level-zero
+cargo build --release --locked --no-default-features --features metal
+```
+
+The native HIP, Level Zero and direct Metal libraries are experimental and
+compiled separately with their vendor SDKs. See [native GPU backends](native/README.md).
+These feature selections do not change the archive format. Missing explicit
+backends report errors rather than silently claiming GPU execution.
 
 
 The compiled binary will be placed at `target/release/bato`.
@@ -113,7 +122,7 @@ By default, Bato utilizes all available CPU cores (`--threads 0`) and manages up
   Native plugin output is checked against the CPU reference on every call.
 - `--compute auto` retains CUDA, wgpu and CPU fallback when a native plugin
   is missing, unsupported, or fails validation.
-- `--stats` reports successful CUDA and wgpu launches, processed filter bytes,
+- `--stats` reports successful CUDA, native and wgpu launches, processed filter bytes,
   and the devices that completed work. Zero launches indicate CPU processing
   for that phase.
 
