@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compare two Bato revisions and print a table after each verified workload.
 
-Use the local universal release build for the branch when available and
+Rebuild and use the local release binary for the branch (see --no-rebuild) and
 report actual CUDA, native HIP/Level Zero/Metal and wgpu filter dispatches.
 """
 import argparse
@@ -154,6 +154,12 @@ def build_revision(revision, root):
         return found
 
 
+def rebuild_local_binary():
+    """Bring target/release/bato up to date; cargo does nothing when it is fresh."""
+    print('Updating local release binary (cargo build --release --bin bato)', flush=True)
+    subprocess.run(['cargo', 'build', '--release', '--bin', 'bato', '--locked'], cwd=PROJECT_ROOT, check=True)
+
+
 def run_case(workload, name, build, output, args, resources):
     run_output = output / 'cases' / f'{workload["workload_id"]}-{name}'
     run_output.mkdir(parents=True)
@@ -285,6 +291,8 @@ def main():
     branch_source = parser.add_mutually_exclusive_group()
     branch_source.add_argument('--branch-revision', help=f'Build this Git revision instead of using the local binary (fallback: {BRANCH})')
     branch_source.add_argument('--branch-bin', type=Path, help='Use this branch executable (default: target/release/bato when present)')
+    parser.add_argument('--no-rebuild', action='store_true',
+                        help='Use the existing target/release/bato without running cargo build first')
     parser.add_argument('--warmups', type=int, default=0, help='Warmup runs per variant (default: 0)')
     parser.add_argument('--repetitions', type=int, default=1, help='Measured runs per variant (default: 1)')
     parser.add_argument('--bato-segment-size', type=benchmark_suite.positive, metavar='BYTES',
@@ -316,8 +324,11 @@ def run_table(args, output):
     workloads = prepare_workloads(args.corpus, output, seed)
     main = build_capabilities(build_revision(args.main_revision, args.output))
     branch_bin = args.branch_bin
-    if branch_bin is None and args.branch_revision is None and LOCAL_BRANCH_BIN.is_file():
-        branch_bin = LOCAL_BRANCH_BIN
+    if branch_bin is None and args.branch_revision is None:
+        if not args.no_rebuild:
+            rebuild_local_binary()
+        if LOCAL_BRANCH_BIN.is_file():
+            branch_bin = LOCAL_BRANCH_BIN
     if branch_bin is not None:
         supplied = branch_bin.resolve()
         digest = sha256(supplied)
