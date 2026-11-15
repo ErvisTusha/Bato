@@ -13,7 +13,7 @@ pub(crate) mod filters;
 mod scheduler;
 pub mod matvec;
 pub mod streams;
-mod wgpu_filters;
+mod wgpu_backend;
 
 use std::fmt;
 use wgpu::util::DeviceExt;
