@@ -31,6 +31,7 @@ const LIBRARIES: [&str; 3] = ["libcuda.so.1", "libcuda.so", "nvcuda.dll"];
 macro_rules! driver {
     ($($field:ident = $symbol:literal: fn($($argument:ty),*);)*) => {
         /// The loaded driver functions; they stay valid while `_library` lives.
+        #[cfg_attr(not(feature = "wgpu"), allow(dead_code))]
         pub(super) struct Driver {
             $(pub(super) $field: unsafe extern "C" fn($($argument),*) -> Status,)*
             _library: Library,
