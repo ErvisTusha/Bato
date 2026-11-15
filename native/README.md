@@ -102,6 +102,55 @@ BATO_BUNDLE_LEVEL_ZERO_LIBRARY="$PWD/target/native/libbato_level_zero.so" \
 BATO_REQUIRE_BUNDLED_NATIVE=1 cargo build --release --locked --bin bato
 ```
 
+### Linux and Windows SDK-complete release (one executable per platform)
+
+A strict release workflow is now available at
+[Strict all-native Bato platform executable](../.github/workflows/native-all-gpu.yml).
+It builds the real native **HIP** and **Intel Level Zero** plugins, then
+embeds both into a *single* `bato` (Linux x64) or `bato.exe` (Windows x64).
+The Rust `build.rs` refuses to publish an all-native executable unless **both**
+libraries were supplied. It checks the compiled feature list, the embedded
+library list and a lossless archive smoke test before uploading an artifact.
+
+This workflow requires a Linux x64 and/or Windows x64 self-hosted GitHub Actions
+runner with the label `bato-native-sdk`. The machines must have Rust, the
+AMD HIP SDK (`hipcc`) and Intel oneAPI DPC++ (`icpx` on Linux; `icx` on
+Windows) configured in PATH. For Windows, build the native DLLs with:
+
+```powershell
+./scripts/build_native_backends.ps1 -Backend all
+$env:BATO_BUNDLE_HIP_LIBRARY = "$PWD/target/native/bato_hip.dll"
+$env:BATO_BUNDLE_LEVEL_ZERO_LIBRARY = "$PWD/target/native/bato_level_zero.dll"
+$env:BATO_REQUIRE_BUNDLED_NATIVE = "1"
+cargo build --release --locked --bin bato
+```
+
+For Linux, use the Linux all-native commands above. Set
+`BATO_HIP_OFFLOAD_ARCHS` (a comma-separated list such as `gfx1100,gfx1101`)
+on SDK-equipped build machines to include multiple AMD GPU code objects in
+the *same HIP library*. The selected GPU targets must be supported by the
+installed HIP compiler. Unsupported AMD architectures will still need wgpu
+fallback.
+
+Set repository variable `BATO_ENABLE_NATIVE_RELEASE=true` after both
+self-hosted runners are registered to build this strict native artifact on
+each branch push. Without the variable, the workflow's push jobs are skipped
+rather than waiting indefinitely for unavailable SDK runners. The workflow
+can also be selected manually once it is present on the default branch.
+
+**Important limitation:** GitHub-hosted portable release jobs still cannot
+claim that HIP/Level Zero plugins were bundled. The strict native executable
+is only produced when SDK-equipped runners actually compile and embed the
+libraries. The vendor GPU drivers and possibly separately distributable
+vendor runtime dependencies are *not* embedded; those dependencies must be
+checked on clean machines before claiming driver-only installation.
+
+Official setup references:
+[AMD ROCm/HIP](https://rocmdocs.amd.com/projects/HIP/en/latest/install/install.html),
+[AMD Windows HIP SDK](https://rocm.docs.amd.com/projects/install-on-windows/en/latest/),
+[Intel oneAPI Linux](https://www.intel.com/content/www/us/en/docs/oneapi-toolkit/installation-guide-linux/latest/),
+[Intel oneAPI Windows](https://www.intel.com/content/www/us/en/docs/oneapi-toolkit/installation-guide-windows/latest/).
+
 ### Apple Silicon / macOS release
 
 ```bash
@@ -112,9 +161,9 @@ BATO_REQUIRE_BUNDLED_NATIVE=1 cargo build --release --locked --bin bato
 
 The strict `BATO_REQUIRE_BUNDLED_NATIVE=1` flag rejects builds missing
 the platform's required native plugins. On Linux and Windows it requires
-HIP and Level Zero; on macOS it requires direct Metal. For Windows,
-native vendor SDK plugins must first be built with a compatible Windows
-toolchain; the supplied Linux build script does not produce DLLs.
+HIP and Level Zero; on macOS it requires direct Metal. For Windows, build the vendor DLLs with
+`scripts/build_native_backends.ps1` and run the strict native release
+workflow on an SDK-equipped Windows x64 runner.
 
 A normal `cargo build --release --locked` works without vendor SDKs:
 CUDA, wgpu, all native plugin loaders, and CPU are included. Windows/Linux
