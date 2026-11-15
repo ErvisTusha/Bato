@@ -7,7 +7,7 @@ use super::{
     deflate::container,
     descriptor::Descriptor,
     fast, filters,
-    predictor::{self, Predictor},
+    predictor::{self, pipeline, Engine, Predictor, Stages},
     profile::{Step, Timing},
     simd::Dispatch,
     x86,
@@ -59,6 +59,7 @@ struct Run<'a> {
     /// transformed bytes `DEFLATE_EXPANSION` times that.
     max_bytes: usize,
     timing: Timing<'a>,
+    stages: Stages,
 }
 
 /// Fixed per-worker allowance for small bookkeeping allocations, in bytes.
@@ -125,7 +126,31 @@ impl Trials {
             Trials::Parallel { reservations } => reservations,
         }
     }
+
+    /// What one of `ways` concurrent callers may use of these reservations.
+    fn shared(self, ways: usize) -> Trials {
+        match self {
+            Trials::Sequential => Trials::Sequential,
+            Trials::Parallel { reservations } => Trials::Parallel {
+                reservations: (reservations / ways).max(1),
+            },
+        }
+    }
+
+    /// Whether each of `models` concurrent model runs may spread over the
+    /// threads of the stages it has reservations for.
+    fn stages(self, models: usize) -> Stages {
+        if self.is_parallel() && self.reservations() / models >= STAGE_THREADS {
+            Stages::Pipelined
+        } else {
+            Stages::Serial
+        }
+    }
 }
+
+/// Threads of a pipelined model run: the data-driven stage, the mixing stage
+/// and the calibrating coder.
+const STAGE_THREADS: usize = 3;
 
 /// Which side of the codec a worker serves; decoding never builds the
 /// candidate packets that dominate the encoder's independent phase.
@@ -182,6 +207,7 @@ pub(crate) fn memory_required(
         // only when this existing per-worker reservation also covers them.
         .max(independent)
             + 8 * 1024 * 1024
+            + pipeline::memory_required()
             + (segment / chunk)
                 * (std::mem::size_of::<Chunk>()
                     + std::mem::size_of::<crate::core::codec::EncodedChunk>())
@@ -221,7 +247,7 @@ fn concurrent_models_fit(
         return false;
     };
     let per_model = predictor::memory_required(length + PRIMER.len(), descriptor.table_log2)
-        .saturating_add(3 * length + PRIMER.len() + WORKER_SLACK);
+        .saturating_add(3 * length + PRIMER.len() + WORKER_SLACK + pipeline::memory_required());
     reserved.saturating_mul(reservations) >= models.saturating_mul(per_model)
 }
 
@@ -353,6 +379,7 @@ pub(crate) fn encode_segment(
             })
         })
         .transpose()?;
+        let each = trials.shared(transforms.len());
         let outcomes: Vec<_> = std::thread::scope(|scope| {
             let runs: Vec<_> = inputs
                 .iter()
@@ -362,7 +389,7 @@ pub(crate) fn encode_segment(
                         let mut snapshot = Snapshot::shared(shared);
                         model_candidate(
                             input,
-                            (descriptor, trials, descriptor.segment_bytes()),
+                            (descriptor, each, descriptor.segment_bytes()),
                             limit,
                             (timing, &mut snapshot),
                         )
@@ -474,6 +501,13 @@ fn model_candidate(
     limit: usize,
     (timing, snapshot): (Timing<'_>, &mut Snapshot),
 ) -> Result<Option<(usize, Primer, Vec<Chunk>)>, BatoError> {
+    // Primed and unprimed trials run side by side when both are tried.
+    let models = if input.len() > UNPRIMED_TRIAL_BYTES {
+        1
+    } else {
+        2
+    };
+    let stages = trials.stages(models);
     let run = |primer,
                cap,
                snapshot: Option<&mut Snapshot>|
@@ -484,6 +518,7 @@ fn model_candidate(
             budget: Some(cap),
             max_bytes,
             timing,
+            stages,
         };
         let chunks = encode_model(input, descriptor, run, snapshot)?;
         Ok(chunks.map(|chunks| (chunks_cost(&chunks), primer, chunks)))
@@ -607,6 +642,7 @@ fn encode_with_dispatch(
         budget: None,
         max_bytes: descriptor.segment_bytes(),
         timing: Timing::off(),
+        stages: Stages::Serial,
     };
     encode_model(raw, descriptor, run, None)?
         .ok_or_else(|| BatoError::CorruptStream("unbounded model encoding aborted".into()))
@@ -648,15 +684,24 @@ fn encode_model(
     let mut history = try_capacity(total)?;
     history.extend_from_slice(primer);
     history.extend_from_slice(raw);
+    let geometry = (&history[..], primer.len());
+    if run.stages == Stages::Pipelined {
+        // The stage threads carry no step timer; `--timing` runs serially.
+        return run.timing.time(Step::ModelTrial, || {
+            pipeline::run_staged(model, geometry, |engine| {
+                encode_chunks(raw, geometry, descriptor, (engine, run.budget))
+            })?
+        });
+    }
     if run.timing.enabled() {
         model.start_meter();
     }
     let coded = run.timing.time(Step::ModelTrial, || {
         encode_chunks(
             raw,
-            (&history, primer.len()),
+            geometry,
             descriptor,
-            (&mut model, run.budget),
+            (&mut Engine::Serial(&mut model), run.budget),
         )
     });
     model.finish_meter(run.timing);
@@ -667,7 +712,7 @@ fn encode_chunks(
     raw: &[u8],
     (history, primed): (&[u8], usize),
     descriptor: Descriptor,
-    (model, budget): (&mut Predictor, Option<usize>),
+    (model, budget): (&mut Engine<'_>, Option<usize>),
 ) -> Result<Option<Vec<Chunk>>, BatoError> {
     let size = descriptor.chunk_bytes();
     let mut output = try_capacity(raw.len().div_ceil(size))?;
@@ -686,7 +731,7 @@ fn encode_chunks(
         for &byte in bytes {
             for shift in (0..8).rev() {
                 let bit = (byte >> shift) & 1;
-                let probability = model.probability(&history[..primed + position]);
+                let probability = model.probability(&history[..primed + position])?;
                 if !coder.exceeded() {
                     coder.bit(bit, probability)?;
                 }
@@ -871,6 +916,7 @@ mod tests {
             budget: None,
             max_bytes: descriptor.segment_bytes(),
             timing: Timing::off(),
+            stages: Stages::Serial,
         };
         for byte in 0..=255u8 {
             let chunks = encode_model(&[byte], descriptor, run, Some(&mut snapshot))
@@ -892,6 +938,7 @@ mod tests {
                 budget: None,
                 max_bytes: descriptor.segment_bytes(),
                 timing: Timing::off(),
+                stages: Stages::Serial,
             };
             encode_model(&raw, descriptor, run, None).unwrap().unwrap()
         };
