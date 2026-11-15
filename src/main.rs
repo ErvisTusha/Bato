@@ -454,6 +454,7 @@ fn parse(args: &[OsString]) -> Option<Command> {
         overwrite,
         compression: CompressionOptions {
             geometry,
+            input_length: None,
             memory_budget: budget,
             execution: execution.clone(),
         },
@@ -479,6 +480,15 @@ fn parse(args: &[OsString]) -> Option<Command> {
 }
 
 /// The input file, or standard input when no path was given.
+/// Length of a regular file, used only to choose the segment size; any file
+/// that cannot be measured is reported when it is opened, so it is skipped here.
+fn regular_file_length(path: &Path) -> Option<u64> {
+    fs::metadata(path) // Failure is reported by the open that follows.
+        .ok()
+        .filter(fs::Metadata::is_file)
+        .map(|metadata| metadata.len())
+}
+
 fn open_input(input: Option<&Path>) -> Box<dyn Read> {
     match input {
         Some(path) => Box::new(BufReader::new(
@@ -517,8 +527,11 @@ where
 }
 
 fn compress(command: &Command) -> Result<(), String> {
-    let options = &command.compression;
     let input = command.input.as_deref();
+    let options = &CompressionOptions {
+        input_length: input.and_then(regular_file_length),
+        ..command.compression.clone()
+    };
     let to_stdout = match &command.output {
         OutputTarget::Stdout => true,
         OutputTarget::Default => input.is_none(),

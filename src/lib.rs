@@ -26,7 +26,11 @@ pub fn compress_with_options(
 ) -> Result<Vec<u8>, BatoError> {
     let host = core::memory::HostBudget::new(options.memory_budget, &options.execution.stats)?;
     let mut out = core::memory::ManagedVec::new(&host)?;
-    core::frame::compress_with_budget(&mut Cursor::new(data), &mut out, options, host)?;
+    let sized = CompressionOptions {
+        input_length: Some(data.len() as u64),
+        ..options.clone()
+    };
+    core::frame::compress_with_budget(&mut Cursor::new(data), &mut out, &sized, host)?;
     Ok(out.into_vec())
 }
 pub fn decompress(data: &[u8]) -> Result<Vec<u8>, BatoError> {

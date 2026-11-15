@@ -366,8 +366,12 @@ pub fn create_solid_archive_excluding<P: AsRef<Path>, W: Write>(
         host.available(),
         &o.execution,
     )?;
-    with_catalogue(dir.as_ref(), excluded, |input| {
-        compress_archive_stream(input, w, o, host).map(|(_, n)| n)
+    with_catalogue(dir.as_ref(), excluded, |input, length| {
+        let sized = CompressionOptions {
+            input_length: Some(length),
+            ..o.clone()
+        };
+        compress_archive_stream(input, w, &sized, host).map(|(_, n)| n)
     })
 }
 
@@ -379,14 +383,14 @@ pub fn stage_catalogue(
 ) -> Result<(), BatoError> {
     let host = HostBudget::new(options.memory_budget, &options.execution.stats)?;
     let _metadata = host.reserve(INVENTORY_METADATA + 512 * 1024)?;
-    with_catalogue(source, &[], |input| Ok(io::copy(input, output)?))?;
+    with_catalogue(source, &[], |input, _| Ok(io::copy(input, output)?))?;
     Ok(())
 }
 
 fn with_catalogue<T>(
     dir: &Path,
     excluded: &[PathBuf],
-    consume: impl FnOnce(&mut ArchiveInput<'_>) -> Result<T, BatoError>,
+    consume: impl FnOnce(&mut ArchiveInput<'_>, u64) -> Result<T, BatoError>,
 ) -> Result<T, BatoError> {
     // Reject links before lexical normalization, then use consistent absolute
     // paths for inventory and exclusions (including a new in-tree output).
@@ -464,7 +468,16 @@ fn with_catalogue<T>(
         expected_files: &expected_files,
         started: false,
     };
-    let result = consume(&mut input)?;
+    // The catalogue stream is these entries plus a few bytes of header each,
+    // so this is a deterministic estimate of its length; duplicates add none.
+    let length = input.stage.len() as u64
+        + expected_files
+            .iter()
+            .zip(&duplicates)
+            .filter(|(_, duplicate)| duplicate.is_none())
+            .map(|(file, _)| file.0)
+            .sum::<u64>();
+    let result = consume(&mut input, length)?;
     root_guard.verify().map_err(err)?;
     Ok(result)
 }

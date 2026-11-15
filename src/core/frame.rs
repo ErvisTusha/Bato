@@ -324,7 +324,7 @@ fn compress_kind<R: Read, W: Write>(
     o: &CompressionOptions,
     destination: Destination,
 ) -> Result<(usize, usize), BatoError> {
-    encode_segments(r, w, o, destination, (None, &mut |_, _| Ok(())))
+    encode_segments(r, w, &o.resolved(), destination, (None, &mut |_, _| Ok(())))
 }
 
 type EncodeProgress<'a, W> = (

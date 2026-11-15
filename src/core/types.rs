@@ -11,6 +11,16 @@ pub const VERSION_MINOR: u8 = 22;
 pub const MAX_CHUNK_SIZE: usize = 1024 * 1024;
 pub const DEFAULT_SEGMENT_SIZE: usize = 64 * 1024 * 1024;
 pub const DEFAULT_CHUNK_SIZE: usize = 256 * 1024;
+/// Independent streams (segments) a large input is spread over, so that this
+/// many cores code and decode it at once. Fixed, never derived from the
+/// machine, so an archive's bytes do not depend on where it was made.
+/// Measured on a 7.5 MB executable (1 stream = 1,691,899 bytes): 2 streams
+/// cost +2.0% and decode 1.8x faster, 4 cost +3.6% and 3.0x, 8 cost +6.2% and
+/// 3.3x; more streams than cores only lose size.
+pub const AUTO_STREAMS: u64 = 4;
+/// Smallest automatic segment, in bytes. Below two of these an input stays one
+/// stream: on 508 KB of text, 2 streams cost +4.1% and 4 cost +8.0%.
+pub const MIN_AUTO_SEGMENT: usize = 1024 * 1024;
 pub const DEFAULT_TABLE_LOG2: u8 = 22;
 /// Largest number of worker threads a caller may request.
 pub const MAX_THREADS: usize = 256;
@@ -387,6 +397,25 @@ impl Default for Geometry {
     }
 }
 impl Geometry {
+    /// The geometry to code an input of `length` bytes with. A segment size
+    /// left at `DEFAULT_SEGMENT_SIZE` is chosen from the length: inputs below
+    /// two minimum segments stay one stream, larger ones up to one default
+    /// segment are spread over `AUTO_STREAMS` independent streams, and
+    /// anything beyond keeps the default. Other segment sizes are kept.
+    pub fn for_input(self, length: u64) -> Geometry {
+        if self.segment_size != DEFAULT_SEGMENT_SIZE
+            || length < 2 * MIN_AUTO_SEGMENT as u64
+            || length > DEFAULT_SEGMENT_SIZE as u64
+        {
+            return self;
+        }
+        let share = length.div_ceil(AUTO_STREAMS);
+        let segment = usize::try_from(share.next_power_of_two()).unwrap_or(DEFAULT_SEGMENT_SIZE);
+        Geometry {
+            segment_size: segment.clamp(MIN_AUTO_SEGMENT, DEFAULT_SEGMENT_SIZE),
+            ..self
+        }
+    }
     pub fn validate(&self) -> Result<(), BatoError> {
         self.descriptor().map(|_| ())
     }
@@ -415,10 +444,23 @@ impl Geometry {
 #[derive(Debug, Clone, Default)]
 pub struct CompressionOptions {
     pub geometry: Geometry,
+    /// Length of the input in bytes when the caller knows it. It lets the
+    /// encoder pick the segment size (see `Geometry::for_input`); without it
+    /// the geometry is used as given.
+    pub input_length: Option<u64>,
     pub memory_budget: MemoryBudget,
     pub execution: ExecutionOptions,
 }
 impl CompressionOptions {
+    /// These options with the geometry the known input length calls for.
+    pub(crate) fn resolved(&self) -> CompressionOptions {
+        CompressionOptions {
+            geometry: self
+                .input_length
+                .map_or(self.geometry, |length| self.geometry.for_input(length)),
+            ..self.clone()
+        }
+    }
     pub fn validate(&self) -> Result<(), BatoError> {
         self.execution.validate()?;
         self.geometry.validate()?;
