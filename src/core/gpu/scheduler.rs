@@ -116,7 +116,10 @@ impl<'a> WorkerFilters<'a> {
             }
         }
 
+        #[cfg(any(feature = "cuda", feature = "wgpu"))]
         let mut reason = discovery_error.clone();
+        #[cfg(not(any(feature = "cuda", feature = "wgpu")))]
+        let reason = discovery_error.clone();
         #[cfg(any(feature = "cuda", feature = "wgpu"))]
         {
             let mut output = None;
