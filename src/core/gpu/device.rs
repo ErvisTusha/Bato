@@ -13,7 +13,9 @@ use super::cuda::Cuda;
 #[cfg(feature = "cuda")]
 use std::sync::atomic::AtomicUsize;
 #[cfg(feature = "wgpu")]
-use super::backend::wgpu::{Gpu, WgpuFilters, NVIDIA_VENDOR};
+use super::backend::wgpu::{Gpu, WgpuFilters};
+#[cfg(all(feature = "cuda", feature = "wgpu"))]
+use super::backend::wgpu::NVIDIA_VENDOR;
 
 #[cfg(any(feature = "cuda", feature = "wgpu"))]
 #[derive(Default)]
