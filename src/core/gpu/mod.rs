@@ -6,6 +6,7 @@
 mod backend;
 mod device;
 pub(crate) mod filters;
+mod operations;
 mod scheduler;
 
 #[cfg(all(feature = "cuda", feature = "wgpu"))]
