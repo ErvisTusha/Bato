@@ -114,6 +114,22 @@ fn help() {
         VERSION_MAJOR,
         VERSION_MINOR
     );
+    let compiled = [
+        (cfg!(feature = "cuda"), "CUDA"),
+        (cfg!(feature = "hip"), "HIP"),
+        (cfg!(feature = "level-zero"), "Level Zero"),
+        (cfg!(feature = "metal"), "Metal"),
+        (cfg!(feature = "wgpu"), "wgpu"),
+    ]
+    .into_iter()
+    .filter_map(|(enabled, name)| enabled.then_some(name))
+    .collect::<Vec<_>>()
+    .join(", ");
+    eprintln!(
+        "Compiled GPU backends: {}; CPU always included; bundled native SDK libraries: {}",
+        if compiled.is_empty() { "none" } else { &compiled },
+        option_env!("BATO_BUNDLED_NATIVE_BACKENDS").unwrap_or("none"),
+    );
     eprintln!("Usage: bato [OPTIONS] [FILE]");
     eprintln!("Options: -c -d -t -i archive extract -o PATH -f --segment-size BYTES --chunk-size BYTES --threads N --compute auto|cpu|cuda|hip|level-zero|metal|wgpu --memory-budget auto|BYTES --stats --timing");
     eprintln!("Archive commands: archive DIRECTORY, extract ARCHIVE [MEMBER...], add ARCHIVE PATH..., remove ARCHIVE MEMBER...");
