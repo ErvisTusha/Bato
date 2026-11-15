@@ -401,7 +401,7 @@ mod tests {
         ] {
             assert!(SHADER.contains(&constant), "{constant}");
         }
-        let source = include_str!("cuda/kernels.cu");
+        let source = include_str!("../../../native/cuda/kernels.cu");
         for constant in [
             format!("#define OUTPUT_SHIFT {OUTPUT_SHIFT}"),
             format!("#define OUTPUT_LIMIT {OUTPUT_LIMIT}"),
