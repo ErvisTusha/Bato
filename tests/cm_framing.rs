@@ -20,6 +20,7 @@ fn options() -> CompressionOptions {
             threads: 1,
             ..Default::default()
         },
+        ..Default::default()
     }
 }
 fn decode_options() -> DecompressionOptions {
