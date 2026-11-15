@@ -55,8 +55,8 @@ def main(argv=None, *, result_rows=None):
     parser.add_argument("--allow-unavailable", action="store_true", help="Record missing/failed tools and measure only ready codecs")
     parser.add_argument("--list-workloads", action="store_true", help="Print the manifest without generating fixtures, checking tools, or measuring")
     parser.add_argument("--workload", choices=["files", "directories", "both"], default="both")
-    parser.add_argument("--bato-compute", choices=["auto", "cpu", "cuda", "wgpu"],
-                        help="Byte filter backend for Bato binaries that support --compute")
+    parser.add_argument("--bato-compute", choices=["auto", "cpu", "cuda", "hip", "level-zero", "metal", "wgpu"],
+                        default="auto", help="Bato byte-filter backend (default: auto, all detected GPU devices plus CPU fallback)")
     parser.add_argument("--bato-bin", help="Path to the Rust Bato executable")
     parser.add_argument("--only-bato", action="store_true")
     parser.add_argument("--codecs", help="Comma-separated bato,kgb,paq8px,paq8l,zpaq,cmix,nncp,rar,7z,xz,zstd,gzip,lz4,zip,bzip2; cmix/nncp require opt-in")
