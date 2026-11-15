@@ -100,6 +100,12 @@ The native NVIDIA CUDA source and embedded PTX are now stored together in
 `native/cuda/kernels.cu` and `native/cuda/kernels.ptx`. The Rust Driver
 API wrapper is in `src/core/gpu/backend/cuda/`. The exact existing PTX and
 its source SHA-256 header were retained, so the archive codec does not need
-an NVIDIA Toolkit at build time. When changing the CUDA source, regenerate
-and validate PTX before committing; the existing CUDA source-hash parity test
-checks that the embedded PTX corresponds to the source.
+an NVIDIA Toolkit at build time. When changing the CUDA source, run:
+
+```bash
+bash scripts/regenerate_cuda_ptx.sh
+cargo test --no-default-features --features cuda ptx_is_generated_from_the_current_source
+```
+
+The CUDA source-hash parity test checks that the embedded PTX corresponds
+to the current CUDA source.
