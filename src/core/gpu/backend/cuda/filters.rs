@@ -1,8 +1,11 @@
 //! CUDA implementations of the format's delta and byte-plane filters.
 //! Provenance: original implementation of the byte operations in cm/filters.rs,
 //! using parallel prefix sums for delta inversion.
+use super::super::super::{
+    filters::{Direction, MAX_BYTES},
+    GpuError,
+};
 use super::{Argument, Cuda, Memory};
-use super::super::super::{filters::{Direction, MAX_BYTES}, GpuError};
 use crate::core::types::TransformId;
 
 /// Bytes processed by a workgroup of the inverse delta kernel.
