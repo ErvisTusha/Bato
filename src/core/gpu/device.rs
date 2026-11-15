@@ -3,7 +3,7 @@
 
 use super::{
     cuda::Cuda,
-    wgpu_filters::WgpuFilters,
+    wgpu_backend::WgpuFilters,
     Gpu, GpuError, NVIDIA_VENDOR,
 };
 use crate::core::types::Compute;
