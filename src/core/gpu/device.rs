@@ -2,9 +2,12 @@
 //! CUDA and wgpu backends. Native SDK plugins have their own discovery layer.
 //! PCI identities prevent a CUDA device from also occupying a wgpu slot.
 
+#[cfg(any(feature = "cuda", feature = "wgpu"))]
 use super::GpuError;
 use crate::core::types::Compute;
-use std::sync::{Mutex, MutexGuard, OnceLock, TryLockError};
+use std::sync::OnceLock;
+#[cfg(any(feature = "cuda", feature = "wgpu"))]
+use std::sync::{Mutex, MutexGuard, TryLockError};
 #[cfg(feature = "cuda")]
 use super::cuda::Cuda;
 #[cfg(feature = "cuda")]
@@ -12,6 +15,7 @@ use std::sync::atomic::AtomicUsize;
 #[cfg(feature = "wgpu")]
 use super::backend::wgpu::{Gpu, WgpuFilters, NVIDIA_VENDOR};
 
+#[cfg(any(feature = "cuda", feature = "wgpu"))]
 #[derive(Default)]
 pub(super) struct DeviceState {
     #[cfg(feature = "cuda")]
@@ -22,6 +26,7 @@ pub(super) struct DeviceState {
     pub(super) wgpu: Option<WgpuFilters>,
 }
 
+#[cfg(any(feature = "cuda", feature = "wgpu"))]
 pub(super) struct DeviceSlot {
     #[cfg(feature = "cuda")]
     pub(super) cuda: Option<i32>,
@@ -32,6 +37,7 @@ pub(super) struct DeviceSlot {
     state: Mutex<DeviceState>,
 }
 
+#[cfg(any(feature = "cuda", feature = "wgpu"))]
 impl DeviceSlot {
     pub(super) fn acquire(&self, compute: Compute) -> Result<Option<MutexGuard<'_, DeviceState>>, GpuError> {
         let result = if compute == Compute::Auto {
@@ -48,6 +54,9 @@ impl DeviceSlot {
         }
     }
 }
+
+#[cfg(not(any(feature = "cuda", feature = "wgpu")))]
+pub(super) type DeviceSlot = ();
 
 pub(super) struct Devices {
     pub(super) slots: Vec<DeviceSlot>,
@@ -72,7 +81,10 @@ impl Devices {
         let mut discovery_error = None;
         #[cfg(not(feature = "cuda"))]
         let discovery_error = None;
+        #[cfg(any(feature = "cuda", feature = "wgpu"))]
         let mut slots = Vec::new();
+        #[cfg(not(any(feature = "cuda", feature = "wgpu")))]
+        let slots = Vec::new();
 
         #[cfg(feature = "cuda")]
         let cuda = if matches!(compute, Compute::Auto | Compute::Cuda) {
