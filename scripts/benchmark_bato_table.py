@@ -204,7 +204,7 @@ def run_case(workload, name, build, output, args, resources):
 def build_capabilities(build):
     help_result = subprocess.run([build['binary'], '--help'], capture_output=True, text=True, check=True)
     help_text = help_result.stdout + help_result.stderr
-    found = re.search(r'--compute\\s+([a-z0-9|\\-]+)', help_text)
+    found = re.search(r'--compute\s+([a-z0-9|-]+)', help_text)
     modes = set(found.group(1).split('|')) if found else set()
     return {**build, 'gpu_compute_modes': sorted(modes),
             'cuda_filters': 'cuda' in modes, 'wgpu_filters': 'wgpu' in modes}
