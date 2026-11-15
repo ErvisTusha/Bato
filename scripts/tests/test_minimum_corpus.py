@@ -82,7 +82,7 @@ class MinimumCorpusTests(unittest.TestCase):
             return unittest.TestResult()
         with patch('run_tests.select_samples', side_effect=lambda root, mode, seed: minimum_samples(root)) as select, \
              patch('run_tests.resolve_bato', return_value=(Path('/unused/bato'),'test')), \
-             patch('run_tests.ensure_test_baselines', return_value=0) as gate, \
+             patch('bato_tools.test_campaign.ensure_test_baselines', return_value=0) as gate, \
              patch.object(unittest.TextTestRunner, 'run', side_effect=run), contextlib.redirect_stdout(io.StringIO()):
             for flags in [[],['--min']]:
                 self.assertEqual(run_tests.main(['--corpus',str(self.root)] + flags),0)

@@ -73,7 +73,7 @@ class GateOrderTests(unittest.TestCase):
         sample = type('Sample',(),dict(relative_path='real/txt/a.txt',size=1,digest='sha'))()
         with patch('run_tests.select_samples',return_value=[sample]), \
              patch('run_tests.resolve_bato',return_value=(Path('/unused'),'fixture')), \
-             patch('run_tests.ensure_test_baselines',return_value=2), \
+             patch('bato_tools.test_campaign.ensure_test_baselines',return_value=2), \
              patch.object(unittest.TextTestRunner,'run',side_effect=AssertionError('Bato started')), \
              contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(run_tests.main(['--min']),2)
@@ -83,7 +83,7 @@ class GateOrderTests(unittest.TestCase):
         sample = type('Sample',(),dict(relative_path='real/txt/a.txt',size=1,digest='sha'))()
         with patch('run_tests.select_samples',return_value=[sample]), \
              patch('run_tests.resolve_bato',return_value=(Path('/unused'),'fixture')), \
-             patch('run_tests.ensure_test_baselines',return_value=1), \
+             patch('bato_tools.test_campaign.ensure_test_baselines',return_value=1), \
              patch.object(unittest.TextTestRunner,'run',return_value=unittest.TestResult()) as run, \
              contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(run_tests.main(['--min']),1)
