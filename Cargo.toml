@@ -13,7 +13,12 @@ categories = ["compression", "algorithms"]
 [features]
 # Preserve existing GPU-enabled builds by default; allow a pure CPU build.
 default = ["gpu"]
+# Existing CUDA + wgpu implementation remains the default. Each additional
+# native SDK plugin can be compiled independently and removed independently.
 gpu = ["dep:wgpu", "dep:pollster", "dep:libloading"]
+hip = ["gpu"]
+level-zero = ["gpu"]
+metal = ["gpu"]
 
 [dependencies]
 sha2 = "0.10"
