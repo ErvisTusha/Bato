@@ -55,7 +55,9 @@ impl<'a> WorkerFilters<'a> {
         let minimum = match self.compute {
             Compute::Cpu => return Ok(None),
             Compute::Auto => AUTO_MIN_BYTES,
-            Compute::Cuda | Compute::Wgpu | Compute::Hip | Compute::LevelZero | Compute::Metal => 1,
+            Compute::Cuda | Compute::Wgpu | Compute::Hip | Compute::LevelZero | Compute::Metal => {
+                1
+            }
         };
         if !(minimum..=MAX_BYTES).contains(&input.len()) {
             return Ok(None);
@@ -80,7 +82,12 @@ impl<'a> WorkerFilters<'a> {
         }
 
         #[cfg(any(feature = "hip", feature = "level-zero", feature = "metal"))]
-        let gpu_slot_count = self.pool.0.get_or_init(|| Devices::discover(self.compute)).slots.len();
+        let gpu_slot_count = self
+            .pool
+            .0
+            .get_or_init(|| Devices::discover(self.compute))
+            .slots
+            .len();
         #[cfg(any(feature = "hip", feature = "level-zero", feature = "metal"))]
         let native_count = if self.compute == Compute::Auto {
             self.native
