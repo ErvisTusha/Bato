@@ -6,7 +6,7 @@ use super::{
     cuda::{self, Cuda},
     device::{Devices, FilterPool},
     filters::{Direction, AUTO_MIN_BYTES, MAX_BYTES},
-    wgpu_filters::WgpuFilters,
+    wgpu_backend::WgpuFilters,
     GpuError,
 };
 use crate::core::{
