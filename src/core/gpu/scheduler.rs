@@ -2,22 +2,22 @@
 //! CUDA and wgpu can compile independently. Native vendor plugins are
 //! independently optional, without linking their SDKs into the Rust binary.
 
+#[cfg(any(feature = "hip", feature = "level-zero", feature = "metal"))]
+use super::backend::native::{NativeKind, WorkerNative};
+#[cfg(feature = "wgpu")]
+use super::backend::wgpu::WgpuFilters;
+#[cfg(feature = "cuda")]
+use super::cuda::{self, Cuda};
 use super::{
     device::{Devices, FilterPool},
     filters::{Direction, AUTO_MIN_BYTES, MAX_BYTES},
     GpuError,
 };
-use crate::core::types::{BatoError, Compute, ExecutionStats, TransformId};
 #[cfg(any(feature = "cuda", feature = "wgpu"))]
 use crate::core::memory::try_filled;
-#[cfg(feature = "cuda")]
-use super::cuda::{self, Cuda};
+use crate::core::types::{BatoError, Compute, ExecutionStats, TransformId};
 #[cfg(feature = "cuda")]
 use std::sync::atomic::Ordering;
-#[cfg(feature = "wgpu")]
-use super::backend::wgpu::WgpuFilters;
-#[cfg(any(feature = "hip", feature = "level-zero", feature = "metal"))]
-use super::backend::native::{NativeKind, WorkerNative};
 
 pub(crate) struct WorkerFilters<'a> {
     compute: Compute,
@@ -58,9 +58,7 @@ impl<'a> WorkerFilters<'a> {
         let minimum = match self.compute {
             Compute::Cpu => return Ok(None),
             Compute::Auto => AUTO_MIN_BYTES,
-            Compute::Cuda | Compute::Wgpu | Compute::Hip | Compute::LevelZero | Compute::Metal => {
-                1
-            }
+            Compute::Cuda | Compute::Wgpu | Compute::Hip | Compute::LevelZero | Compute::Metal => 1,
         };
         if !(minimum..=MAX_BYTES).contains(&input.len()) {
             return Ok(None);
@@ -88,7 +86,10 @@ impl<'a> WorkerFilters<'a> {
             }
         }
         #[cfg(not(any(feature = "hip", feature = "level-zero", feature = "metal")))]
-        if matches!(self.compute, Compute::Hip | Compute::LevelZero | Compute::Metal) {
+        if matches!(
+            self.compute,
+            Compute::Hip | Compute::LevelZero | Compute::Metal
+        ) {
             return Err(BatoError::Native(
                 "native backend feature was not compiled".into(),
             ));
@@ -110,8 +111,8 @@ impl<'a> WorkerFilters<'a> {
             0
         };
         #[cfg(any(feature = "hip", feature = "level-zero", feature = "metal"))]
-        let prefer_native = native_count > 0
-            && self.worker % (native_count + gpu_slot_count) < native_count;
+        let prefer_native =
+            native_count > 0 && self.worker % (native_count + gpu_slot_count) < native_count;
         #[cfg(any(feature = "hip", feature = "level-zero", feature = "metal"))]
         if prefer_native {
             if let Some(output) = self.try_native(input, transform, direction, None)? {
@@ -230,17 +231,16 @@ impl<'a> WorkerFilters<'a> {
                     if let Some(adapter) = adapter {
                         let result = match &state.wgpu {
                             Some(filter) => Ok(filter),
-                            None => WgpuFilters::open(adapter)
-                                .map(|filter| &*state.wgpu.insert(filter)),
+                            None => {
+                                WgpuFilters::open(adapter).map(|filter| &*state.wgpu.insert(filter))
+                            }
                         }
                         .and_then(|filter| filter.apply(input, bytes, (transform, direction)));
                         match result {
                             Ok(launches) => {
                                 let info = adapter.get_info();
-                                let device = format!(
-                                    "{} ({:?}, wgpu #{index})",
-                                    info.name, info.backend
-                                );
+                                let device =
+                                    format!("{} ({:?}, wgpu #{index})", info.name, info.backend);
                                 self.stats.update(|stats| {
                                     stats.wgpu_filter_dispatches += launches;
                                     stats.wgpu_filter_bytes += input.len() as u64;
@@ -312,9 +312,12 @@ impl<'a> WorkerFilters<'a> {
                 Ok(Some(output))
             }
             Ok(None) if selected.is_none() => Ok(None),
-            Ok(None) => Err(BatoError::Native("requested native GPU is unavailable".into())),
+            Ok(None) => Err(BatoError::Native(
+                "requested native GPU is unavailable".into(),
+            )),
             Err(error) if selected.is_none() => {
-                self.stats.update(|stats| stats.gpu_fallback = error.to_string());
+                self.stats
+                    .update(|stats| stats.gpu_fallback = error.to_string());
                 Ok(None)
             }
             Err(error) => Err(BatoError::Native(error.to_string())),

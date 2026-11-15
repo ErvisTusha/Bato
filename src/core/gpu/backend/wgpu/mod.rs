@@ -4,8 +4,8 @@
 mod context;
 mod filters;
 
-pub use context::Gpu;
 pub(in crate::core::gpu) use context::words;
+pub use context::Gpu;
 #[cfg(feature = "cuda")]
 pub(in crate::core::gpu) use context::{Kernel, NVIDIA_VENDOR};
 pub(in crate::core::gpu) use filters::WgpuFilters;

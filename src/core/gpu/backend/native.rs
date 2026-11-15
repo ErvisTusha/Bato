@@ -96,9 +96,7 @@ fn embedded_library(kind: NativeKind) -> Option<&'static [u8]> {
 /// native module unloads, including on Windows.
 static BUNDLE: OnceLock<Mutex<Weak<TempDir>>> = OnceLock::new();
 
-fn bundled_library_path(
-    kind: NativeKind,
-) -> Result<Option<(PathBuf, Arc<TempDir>)>, GpuError> {
+fn bundled_library_path(kind: NativeKind) -> Result<Option<(PathBuf, Arc<TempDir>)>, GpuError> {
     let Some(data) = embedded_library(kind) else {
         return Ok(None);
     };
@@ -171,14 +169,16 @@ impl Plugin {
         let actual = unsafe { version() };
         if actual != ABI_VERSION {
             return Err(GpuError::Device(format!(
-                "{} plugin ABI {actual}, expected {ABI_VERSION}", kind.label()
+                "{} plugin ABI {actual}, expected {ABI_VERSION}",
+                kind.label()
             )));
         }
         // SAFETY: the ABI states that device_count takes no arguments.
         let discovered = unsafe { count() };
         if discovered <= 0 {
             return Err(GpuError::Device(format!(
-                "{} has no available native GPU devices", kind.label()
+                "{} has no available native GPU devices",
+                kind.label()
             )));
         }
         Ok(Self {
@@ -215,14 +215,16 @@ impl Plugin {
         };
         if result != 0 {
             return Err(GpuError::Execution(format!(
-                "{} GPU #{ordinal} filter returned error {result}", self.kind.label()
+                "{} GPU #{ordinal} filter returned error {result}",
+                self.kind.label()
             )));
         }
         // Verify every byte without allocating a second segment-sized
         // buffer. Native SDK output can never silently alter archive bytes.
         if !filters::matches_exact_filter(input, &output, transform, direction) {
             return Err(GpuError::Execution(format!(
-                "{} GPU #{ordinal} disagrees with exact CPU filter", self.kind.label()
+                "{} GPU #{ordinal} disagrees with exact CPU filter",
+                self.kind.label()
             )));
         }
         Ok(output)

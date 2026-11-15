@@ -44,15 +44,20 @@ fn validate_binary(path: &Path, os: &str) {
     });
     let mut signature = [0_u8; 4];
     file.read_exact(&mut signature).unwrap_or_else(|error| {
-        panic!("native GPU library {} is empty or unreadable: {error}", path.display())
+        panic!(
+            "native GPU library {} is empty or unreadable: {error}",
+            path.display()
+        )
     });
     let valid = match os {
         "linux" => signature == *b"\x7fELF",
         "windows" => signature[..2] == *b"MZ",
         "macos" => matches!(
             signature,
-            [0xcf, 0xfa, 0xed, 0xfe] | [0xfe, 0xed, 0xfa, 0xcf]
-                | [0xca, 0xfe, 0xba, 0xbe] | [0xbe, 0xba, 0xfe, 0xca]
+            [0xcf, 0xfa, 0xed, 0xfe]
+                | [0xfe, 0xed, 0xfa, 0xcf]
+                | [0xca, 0xfe, 0xba, 0xbe]
+                | [0xbe, 0xba, 0xfe, 0xca]
         ),
         other => panic!("unsupported native GPU library target OS: {other}"),
     };
@@ -79,7 +84,10 @@ fn main() {
             backend.source
         );
         let file = PathBuf::from(path).canonicalize().unwrap_or_else(|error| {
-            panic!("cannot resolve {} native GPU library: {error}", backend.source)
+            panic!(
+                "cannot resolve {} native GPU library: {error}",
+                backend.source
+            )
         });
         validate_binary(&file, &target_os);
         println!("cargo:rerun-if-changed={}", file.display());

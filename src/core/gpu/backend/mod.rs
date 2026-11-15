@@ -6,11 +6,11 @@ pub mod cuda;
 #[cfg(feature = "wgpu")]
 pub mod wgpu;
 
-#[cfg(any(feature = "hip", feature = "level-zero", feature = "metal"))]
-pub(in crate::core::gpu) mod native;
 #[cfg(feature = "hip")]
 pub(in crate::core::gpu) mod hip;
 #[cfg(feature = "level-zero")]
 pub(in crate::core::gpu) mod level_zero;
 #[cfg(feature = "metal")]
 pub(in crate::core::gpu) mod metal;
+#[cfg(any(feature = "hip", feature = "level-zero", feature = "metal"))]
+pub(in crate::core::gpu) mod native;

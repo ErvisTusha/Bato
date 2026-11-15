@@ -2,20 +2,20 @@
 //! CUDA and wgpu backends. Native SDK plugins have their own discovery layer.
 //! PCI identities prevent a CUDA device from also occupying a wgpu slot.
 
+#[cfg(all(feature = "cuda", feature = "wgpu"))]
+use super::backend::wgpu::NVIDIA_VENDOR;
+#[cfg(feature = "wgpu")]
+use super::backend::wgpu::{Gpu, WgpuFilters};
+#[cfg(feature = "cuda")]
+use super::cuda::Cuda;
 #[cfg(any(feature = "cuda", feature = "wgpu"))]
 use super::GpuError;
 use crate::core::types::Compute;
+#[cfg(feature = "cuda")]
+use std::sync::atomic::AtomicUsize;
 use std::sync::OnceLock;
 #[cfg(any(feature = "cuda", feature = "wgpu"))]
 use std::sync::{Mutex, MutexGuard, TryLockError};
-#[cfg(feature = "cuda")]
-use super::cuda::Cuda;
-#[cfg(feature = "cuda")]
-use std::sync::atomic::AtomicUsize;
-#[cfg(feature = "wgpu")]
-use super::backend::wgpu::{Gpu, WgpuFilters};
-#[cfg(all(feature = "cuda", feature = "wgpu"))]
-use super::backend::wgpu::NVIDIA_VENDOR;
 
 #[cfg(any(feature = "cuda", feature = "wgpu"))]
 #[derive(Default)]
@@ -137,14 +137,16 @@ impl Devices {
                             .filter(|candidate| {
                                 pci_identity(&candidate.pci_bus_id) == Some(*identity)
                             })
-                            .count() == 1
+                            .count()
+                            == 1
                     })
                     .and_then(|identity| {
-                        let mut matching = wgpu_adapters.iter().enumerate().filter(|(_, adapter)| {
-                            let info = adapter.get_info();
-                            info.vendor == NVIDIA_VENDOR
-                                && pci_identity(&info.device_pci_bus_id) == Some(identity)
-                        });
+                        let mut matching =
+                            wgpu_adapters.iter().enumerate().filter(|(_, adapter)| {
+                                let info = adapter.get_info();
+                                info.vendor == NVIDIA_VENDOR
+                                    && pci_identity(&info.device_pci_bus_id) == Some(identity)
+                            });
                         let (index, _) = matching.next()?;
                         matching.next().is_none().then_some(index)
                     })
@@ -170,7 +172,9 @@ impl Devices {
                     && info.vendor == NVIDIA_VENDOR
                     && (has_unknown_cuda
                         || identity.is_none()
-                        || cuda.iter().any(|item| pci_identity(&item.pci_bus_id) == identity))
+                        || cuda
+                            .iter()
+                            .any(|item| pci_identity(&item.pci_bus_id) == identity))
             };
             #[cfg(not(feature = "cuda"))]
             let deferred = false;

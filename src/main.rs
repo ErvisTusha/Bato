@@ -127,7 +127,11 @@ fn help() {
     .join(", ");
     eprintln!(
         "Compiled GPU backends: {}; CPU always included; bundled native SDK libraries: {}",
-        if compiled.is_empty() { "none" } else { &compiled },
+        if compiled.is_empty() {
+            "none"
+        } else {
+            &compiled
+        },
         option_env!("BATO_BUNDLED_NATIVE_BACKENDS").unwrap_or("none"),
     );
     eprintln!("Usage: bato [OPTIONS] [FILE]");

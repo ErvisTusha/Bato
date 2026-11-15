@@ -255,4 +255,3 @@ impl Gpu {
         Ok(values)
     }
 }
-
