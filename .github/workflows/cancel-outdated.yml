@@ -69,6 +69,13 @@ jobs:
             if gh api --method POST \
               "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/cancel" >/dev/null; then
               cancelled=$((cancelled + 1))
+              # Cancel requests are cooperative and GPU/Windows matrix jobs
+              # can stay in_progress for minutes. These runs belong to an
+              # older SHA, so escalate instead of blocking current-commit CI.
+              if ! gh api --method POST \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/force-cancel" >/dev/null; then
+                echo "::notice::Run #$run_id accepted normal cancellation; force-cancel was unavailable or already completed."
+              fi
             else
               # A job can complete between listing and cancellation.
               echo "::warning::Unable to cancel run #$run_id (it may have finished)."
