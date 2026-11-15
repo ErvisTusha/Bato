@@ -95,7 +95,7 @@ jobs:
       - name: Validate lossless archive round trip
         shell: bash
         run: |
-          python scripts/run_tests.py --bato-bin "target/release/${{ matrix.executable }}" --timeout 180
+          python scripts/run_tests.py --self-contained --bato-bin "target/release/${{ matrix.executable }}" --timeout 180
       - name: Upload ONE executable for this OS/architecture (not per GPU)
         uses: actions/upload-artifact@v4
         with:
