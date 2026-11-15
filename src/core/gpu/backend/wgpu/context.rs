@@ -129,7 +129,10 @@ impl Gpu {
 
     /// Runs `build` and returns a validation error it raised on the device.
     #[cfg(feature = "cuda")]
-    pub(in crate::core::gpu) fn validated<T>(&self, build: impl FnOnce() -> T) -> Result<T, GpuError> {
+    pub(in crate::core::gpu) fn validated<T>(
+        &self,
+        build: impl FnOnce() -> T,
+    ) -> Result<T, GpuError> {
         let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let built = build();
         match pollster::block_on(scope.pop()) {
@@ -139,7 +142,11 @@ impl Gpu {
     }
 
     /// A device buffer holding `contents`.
-    pub(in crate::core::gpu) fn uploaded(&self, contents: &[u8], usage: wgpu::BufferUsages) -> wgpu::Buffer {
+    pub(in crate::core::gpu) fn uploaded(
+        &self,
+        contents: &[u8],
+        usage: wgpu::BufferUsages,
+    ) -> wgpu::Buffer {
         self.device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: None,
@@ -149,7 +156,11 @@ impl Gpu {
     }
 
     /// A device buffer of `words` zero values.
-    pub(in crate::core::gpu) fn zeroed(&self, words: usize, usage: wgpu::BufferUsages) -> wgpu::Buffer {
+    pub(in crate::core::gpu) fn zeroed(
+        &self,
+        words: usize,
+        usage: wgpu::BufferUsages,
+    ) -> wgpu::Buffer {
         self.device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: (words * WORD) as u64,
