@@ -39,8 +39,9 @@ const BACKENDS: &[Backend] = &[
 ];
 
 fn validate_binary(path: &Path, os: &str) {
-    let mut file = File::open(path)
-        .unwrap_or_else(|error| panic!("cannot open native GPU library {}: {error}", path.display()));
+    let mut file = File::open(path).unwrap_or_else(|error| {
+        panic!("cannot open native GPU library {}: {error}", path.display())
+    });
     let mut signature = [0_u8; 4];
     file.read_exact(&mut signature).unwrap_or_else(|error| {
         panic!("native GPU library {} is empty or unreadable: {error}", path.display())
