@@ -18,6 +18,7 @@ use crate::core::memory::try_filled;
 use crate::core::types::{BatoError, Compute, ExecutionStats, TransformId};
 #[cfg(feature = "cuda")]
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 pub(crate) struct WorkerFilters<'a> {
     compute: Compute,
@@ -198,6 +199,7 @@ impl<'a> WorkerFilters<'a> {
 
                     #[cfg(feature = "cuda")]
                     if let Some(ordinal) = cuda {
+                        let started = Instant::now();
                         match apply_cuda(
                             &mut self.cuda,
                             ordinal,
@@ -208,6 +210,7 @@ impl<'a> WorkerFilters<'a> {
                                 self.stats.update(|stats| {
                                     stats.cuda_filter_dispatches += launches;
                                     stats.cuda_filter_bytes += input.len() as u64;
+                                    stats.record_gpu_call(input.len(), started.elapsed());
                                     stats.cuda_device = device.clone();
                                     if !stats.gpu_devices.contains(&device) {
                                         stats.gpu_devices.push(device);
@@ -229,6 +232,7 @@ impl<'a> WorkerFilters<'a> {
 
                     #[cfg(feature = "wgpu")]
                     if let Some(adapter) = adapter {
+                        let started = Instant::now();
                         let result = match &state.wgpu {
                             Some(filter) => Ok(filter),
                             None => {
@@ -244,6 +248,7 @@ impl<'a> WorkerFilters<'a> {
                                 self.stats.update(|stats| {
                                     stats.wgpu_filter_dispatches += launches;
                                     stats.wgpu_filter_bytes += input.len() as u64;
+                                    stats.record_gpu_call(input.len(), started.elapsed());
                                     if !stats.gpu_devices.contains(&device) {
                                         stats.gpu_devices.push(device);
                                     }
@@ -299,11 +304,13 @@ impl<'a> WorkerFilters<'a> {
         selected: Option<NativeKind>,
     ) -> Result<Option<Vec<u8>>, BatoError> {
         let native = self.native.get_or_insert_with(WorkerNative::discover);
+        let started = Instant::now();
         match native.run(self.worker, input, transform, direction, selected) {
             Ok(Some((output, device))) => {
                 self.stats.update(|stats| {
                     stats.native_filter_dispatches += 1;
                     stats.native_filter_bytes += input.len() as u64;
+                    stats.record_gpu_call(input.len(), started.elapsed());
                     stats.native_device = device.clone();
                     if !stats.gpu_devices.contains(&device) {
                         stats.gpu_devices.push(device);

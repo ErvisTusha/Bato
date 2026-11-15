@@ -88,7 +88,8 @@ candidate binary. Change `--cpu-limit`, `--threads`, and `--bato-modes`
 together for an equal-resource parallel track, e.g. eight allocated CPUs and
 `--bato-modes cpu`. Serial competitors remain serial within the same
 allocation; do not pretend their CLI supports thread settings it lacks.
-Bato's GPU path covers only the delta and byte-shuffle filters; its
+Bato's GPU path covers only the delta and byte-shuffle filters; `--stats`
+reports their calls, host/device bytes and call wall time, and the
 `--bato-compute` setting is part of the run identity. A GPU competitor (`--nncp-cuda`) is a separate
 hardware track and is never compared with CPU runs as if equal.
 

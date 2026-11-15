@@ -134,11 +134,31 @@ pub struct ExecutionStatsSnapshot {
     /// Devices that successfully completed at least one archive filter.
     pub gpu_devices: Vec<String>,
     pub gpu_fallback: String,
+    /// Filter operations completed on any GPU backend (one per offloaded filter).
+    pub gpu_filter_calls: u64,
+    /// Bytes copied host to device: one upload of the filter input per call.
+    pub gpu_host_to_device_bytes: u64,
+    /// Bytes copied device to host: one download of the same length per call.
+    pub gpu_device_to_host_bytes: u64,
+    /// Wall nanoseconds inside successful GPU filter calls: upload, kernels and
+    /// download together. Backends do not report the split.
+    pub gpu_call_nanos: u64,
     pub estimated_host_memory: usize,
     /// Startup allowance, shared by the entire operation.
     pub memory_budget: usize,
     /// Peak simultaneous conservative reservations, not process RSS.
     pub managed_host_peak: usize,
+}
+impl ExecutionStatsSnapshot {
+    /// Records one successful GPU filter call of `bytes` in and out.
+    pub(crate) fn record_gpu_call(&mut self, bytes: usize, elapsed: std::time::Duration) {
+        self.gpu_filter_calls += 1;
+        self.gpu_host_to_device_bytes += bytes as u64;
+        self.gpu_device_to_host_bytes += bytes as u64;
+        self.gpu_call_nanos = self
+            .gpu_call_nanos
+            .saturating_add(u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX));
+    }
 }
 #[derive(Debug, Default)]
 pub struct ExecutionStats {
