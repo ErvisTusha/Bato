@@ -79,7 +79,8 @@ impl<'a> WorkerFilters<'a> {
             ));
         }
 
-        let devices = self.pool.0.get_or_init(|| Devices::discover(self.compute));
+        #[cfg(any(feature = "hip", feature = "level-zero", feature = "metal"))]
+        let gpu_slot_count = self.pool.0.get_or_init(|| Devices::discover(self.compute)).slots.len();
         #[cfg(any(feature = "hip", feature = "level-zero", feature = "metal"))]
         let native_count = if self.compute == Compute::Auto {
             self.native
@@ -90,14 +91,16 @@ impl<'a> WorkerFilters<'a> {
         };
         #[cfg(any(feature = "hip", feature = "level-zero", feature = "metal"))]
         let prefer_native = native_count > 0
-            && self.worker % (native_count + devices.slots.len()) < native_count;
+            && self.worker % (native_count + gpu_slot_count) < native_count;
         #[cfg(any(feature = "hip", feature = "level-zero", feature = "metal"))]
         if prefer_native {
             if let Some(output) = self.try_native(input, transform, direction, None)? {
                 return Ok(Some(output));
             }
         }
-        let mut reason = devices.discovery_error.clone();
+        let devices = self.pool.0.get_or_init(|| Devices::discover(self.compute));
+        let discovery_error = devices.discovery_error.clone();
+        let mut reason = discovery_error.clone();
         let mut output = None;
         let slot_count = devices.slots.len();
         for deferred in [false, true] {
@@ -208,7 +211,7 @@ impl<'a> WorkerFilters<'a> {
                 self.stats.update(|stats| {
                     stats.gpu_fallback = reason;
                     if stats.cuda_fallback.is_empty() {
-                        if let Some(error) = &devices.discovery_error {
+                        if let Some(error) = &discovery_error {
                             stats.cuda_fallback.clone_from(error);
                         }
                     }
