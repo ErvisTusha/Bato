@@ -1,0 +1,140 @@
+name: Strict all-native Bato platform executable
+
+# Only SDK-equipped build machines can produce true HIP + Level Zero native
+# libraries. The regular GitHub-hosted universal workflow remains portable;
+# this release workflow refuses to publish an executable missing either native
+# library. The output is ONE executable per requested OS/architecture.
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'SDK-equipped platform to build'
+        type: choice
+        required: true
+        options:
+          - linux-x64
+          - windows-x64
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.platform }}
+  cancel-in-progress: true
+
+jobs:
+  linux-native:
+    if: inputs.platform == 'linux-x64'
+    runs-on: [self-hosted, Linux, X64, bato-native-sdk]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Verify native SDK toolchains and format
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v hipcc
+          command -v icpx
+          cargo fmt --all -- --check
+          python3 scripts/check_universal_features.py
+      - name: Compile native HIP and Intel Level Zero shared libraries
+        shell: bash
+        env:
+          BATO_HIP_OFFLOAD_ARCHS: ${{ vars.BATO_HIP_OFFLOAD_ARCHS }}
+        run: bash scripts/build_native_backends.sh all
+      - name: Build one Bato executable with both native libraries embedded
+        shell: bash
+        env:
+          BATO_BUNDLE_HIP_LIBRARY: ${{ github.workspace }}/target/native/libbato_hip.so
+          BATO_BUNDLE_LEVEL_ZERO_LIBRARY: ${{ github.workspace }}/target/native/libbato_level_zero.so
+          BATO_REQUIRE_BUNDLED_NATIVE: '1'
+        run: cargo build --release --locked --bin bato
+      - name: Assert embedded native HIP and Intel Level Zero backends
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./target/release/bato --help > "$RUNNER_TEMP/bato-help.txt" 2>&1
+          grep -F 'Compiled GPU backends: CUDA, HIP, Level Zero, Metal, wgpu' "$RUNNER_TEMP/bato-help.txt"
+          grep -F 'bundled native SDK libraries: hip,level_zero' "$RUNNER_TEMP/bato-help.txt"
+          for library in target/native/libbato_hip.so target/native/libbato_level_zero.so; do
+            for symbol in bato_gpu_abi_version bato_gpu_device_count bato_gpu_filter; do
+              nm -D "$library" | grep -F "$symbol"
+            done
+          done
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify lossless archive on native-ready executable
+        shell: bash
+        run: |
+          python scripts/run_tests.py --self-contained \
+            --bato-bin target/release/bato --timeout 180 \
+            --test test_roundtrip --test test_nested_archive_paths_and_bytes \
+            --test test_streaming_roundtrip --test test_malformed_and_corrupt_streams
+      - name: Publish single all-native Linux executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: bato-linux-x64-all-native
+          path: target/release/bato
+          if-no-files-found: error
+
+  windows-native:
+    if: inputs.platform == 'windows-x64'
+    runs-on: [self-hosted, Windows, X64, bato-native-sdk]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Verify native SDK toolchains and format
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Get-Command hipcc -ErrorAction SilentlyContinue)) { throw 'HIP SDK hipcc is missing' }
+          if (-not (Get-Command icx -ErrorAction SilentlyContinue)) { throw 'Intel oneAPI icx is missing' }
+          cargo fmt --all -- --check
+          if ($LASTEXITCODE -ne 0) { throw 'Rustfmt failed' }
+          python scripts/check_universal_features.py
+          if ($LASTEXITCODE -ne 0) { throw 'Default GPU feature check failed' }
+      - name: Compile native HIP and Intel Level Zero DLLs
+        shell: pwsh
+        env:
+          BATO_HIP_OFFLOAD_ARCHS: ${{ vars.BATO_HIP_OFFLOAD_ARCHS }}
+        run: ./scripts/build_native_backends.ps1 -Backend all
+      - name: Build one Bato.exe with both native libraries embedded
+        shell: pwsh
+        env:
+          BATO_BUNDLE_HIP_LIBRARY: ${{ github.workspace }}/target/native/bato_hip.dll
+          BATO_BUNDLE_LEVEL_ZERO_LIBRARY: ${{ github.workspace }}/target/native/bato_level_zero.dll
+          BATO_REQUIRE_BUNDLED_NATIVE: '1'
+        run: |
+          cargo build --release --locked --bin bato
+          if ($LASTEXITCODE -ne 0) { throw 'Universal Windows native build failed' }
+      - name: Assert compiled and bundled native vendor backends
+        shell: pwsh
+        run: |
+          $Help = & ./target/release/bato.exe --help 2>&1 | Out-String
+          if ($Help -notmatch 'Compiled GPU backends: CUDA, HIP, Level Zero, Metal, wgpu') {
+            throw 'A compiled GPU interface is missing'
+          }
+          if ($Help -notmatch 'bundled native SDK libraries: hip,level_zero') {
+            throw 'Native HIP and Level Zero DLLs were not embedded'
+          }
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify lossless archive on native-ready Windows executable
+        shell: pwsh
+        run: |
+          python scripts/run_tests.py --self-contained --bato-bin target/release/bato.exe --timeout 180 --test test_roundtrip --test test_nested_archive_paths_and_bytes --test test_streaming_roundtrip --test test_malformed_and_corrupt_streams
+          if ($LASTEXITCODE -ne 0) { throw 'Windows lossless smoke tests failed' }
+      - name: Publish single all-native Windows executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: bato-windows-x64-all-native
+          path: target/release/bato.exe
+          if-no-files-found: error
