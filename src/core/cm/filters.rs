@@ -83,10 +83,16 @@ pub(crate) fn matches_exact_filter(
     let body = words * d;
     input.iter().enumerate().all(|(i, &byte)| {
         let expected = match (transform, direction) {
-            (TransformId::Delta1 | TransformId::Delta2 | TransformId::Delta4, Direction::Forward) => {
+            (
+                TransformId::Delta1 | TransformId::Delta2 | TransformId::Delta4,
+                Direction::Forward,
+            ) => {
                 byte.wrapping_sub(if i >= d { input[i - d] } else { 0 })
             }
-            (TransformId::Delta1 | TransformId::Delta2 | TransformId::Delta4, Direction::Inverse) => {
+            (
+                TransformId::Delta1 | TransformId::Delta2 | TransformId::Delta4,
+                Direction::Inverse,
+            ) => {
                 byte.wrapping_add(if i >= d { output[i - d] } else { 0 })
             }
             (TransformId::Shuffle2 | TransformId::Shuffle4, Direction::Forward) => {
