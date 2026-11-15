@@ -365,8 +365,11 @@ fn encode_segments<R: Read, W: Write>(
                 ended = true;
                 break;
             }
-            // A short segment is the last: no later job needs the idle workers.
+            // A short read means end of input, so this is the last segment: no
+            // later job needs the idle workers, and none may reserve memory
+            // after they are lent.
             let reservations = if raw.len() < descriptor.segment_bytes() {
+                ended = true;
                 pool.lend_idle_workers(&mut lease)
             } else {
                 1
