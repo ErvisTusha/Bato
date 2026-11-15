@@ -511,7 +511,7 @@ where
     f(&mut w, &staged.temporary_path())?;
     w.flush().map_err(|e| e.to_string())?;
     drop(w);
-    staged.publish().map_err(|e| e.to_string())
+    staged.publish().map_err(|e| format!("cannot publish staged archive: {e}"))
 }
 
 fn compress(command: &Command) -> Result<(), String> {
