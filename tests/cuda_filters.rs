@@ -1,4 +1,4 @@
-#![cfg(feature = "gpu")]
+#![cfg(feature = "cuda")]
 
 use bato_engine::{
     compress_with_options, decompress_with_options, read_stream_layout, BlockType,
