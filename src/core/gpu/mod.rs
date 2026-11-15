@@ -17,7 +17,7 @@ pub use backend::cuda;
 #[cfg(feature = "wgpu")]
 pub use backend::wgpu::Gpu;
 #[cfg(feature = "wgpu")]
-pub(crate) use backend::wgpu::{words, Kernel};
+pub(in crate::core::gpu) use backend::wgpu::{words, Kernel};
 
 use std::fmt;
 
