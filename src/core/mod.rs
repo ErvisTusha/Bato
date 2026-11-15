@@ -2,9 +2,21 @@ pub mod archive;
 pub mod checksum;
 pub mod codec;
 pub mod frame;
-#[cfg(feature = "gpu")]
+#[cfg(any(
+    feature = "cuda",
+    feature = "wgpu",
+    feature = "hip",
+    feature = "level-zero",
+    feature = "metal"
+))]
 pub mod gpu;
-#[cfg(not(feature = "gpu"))]
+#[cfg(not(any(
+    feature = "cuda",
+    feature = "wgpu",
+    feature = "hip",
+    feature = "level-zero",
+    feature = "metal"
+)))]
 #[path = "gpu_cpu.rs"]
 pub mod gpu;
 pub mod jobs;
