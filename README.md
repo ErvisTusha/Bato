@@ -70,6 +70,10 @@ The compiled executable will be placed at `target/release/bato`
 universal executables for Linux x64/ARM64, Windows x64 and macOS x64/ARM64
 in [the universal-binaries workflow](.github/workflows/universal-binaries.yml).
 Each artifact contains **one executable per OS/architecture**, not one per GPU.
+Pushing a version tag such as `v0.8.0` builds and tests all five portable
+executables, then publishes them on the [GitHub Releases page](https://github.com/ErvisTusha/Bato/releases).
+For example, create and push a tag with `git tag v0.8.0` and
+`git push origin v0.8.0`. All five builds must pass before publication.
 The macOS builds include the direct Metal library; AMD and Intel are always
 supported through the wgpu fallback on compatible driver stacks, even when
 their native SDK plugins were not built by the release runner.

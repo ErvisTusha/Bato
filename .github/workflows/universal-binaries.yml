@@ -4,6 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches: [claude/focused-faraday-t2c712]
+    tags: ['v*']
     paths:
       - 'src/**'
       - 'native/**'
@@ -106,6 +107,34 @@ jobs:
           name: ${{ matrix.artifact }}
           path: target/release/${{ matrix.executable }}
           if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: universal
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download platform executables
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Prepare and publish release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir release-assets
+          for platform in linux-x64 linux-arm64 macos-x64 macos-arm64; do
+            install -m 755 "artifacts/bato-${platform}/bato" "release-assets/bato-${platform}"
+          done
+          install -m 755 artifacts/bato-windows-x64/bato.exe release-assets/bato-windows-x64.exe
+          gh release create "$RELEASE_TAG" release-assets/* --verify-tag --draft --title "$RELEASE_TAG" --generate-notes
+          gh release edit "$RELEASE_TAG" --draft=false
 
   # GitHub-hosted runners do not include ROCm HIP or Intel oneAPI SDKs.
   # These official portable builds still accelerate AMD and Intel hardware
