@@ -73,6 +73,7 @@ pub struct Cuda(Rc<Session>);
 
 pub(in crate::core::gpu) struct Adapter {
     pub(in crate::core::gpu) ordinal: c_int,
+    #[cfg_attr(not(feature = "wgpu"), allow(dead_code))]
     pub(in crate::core::gpu) pci_bus_id: String,
 }
 
