@@ -1354,6 +1354,8 @@ def main(argv=None):
                         help='Run only the named EngineTests method. Can be repeated.')
     parser.add_argument('--extended', action='store_true', help='Include high-disk and high-file-count stress cases')
     parser.add_argument('--min', action='store_true', help='Alias for --sample-mode fast')
+    parser.add_argument('--self-contained', action='store_true',
+                        help='Run built-in archive and recovery tests without an external real-file corpus')
     parser.add_argument('--sample-mode', choices=['fast', 'normal', 'full'], default='normal', help='Number of copied files per extension')
     parser.add_argument('--seed', type=int, default=42, help='Reproducible file selection seed')
     parser.add_argument('--corpus', default=str(DEFAULT_COPIED_CORPUS), help='Copied real-file corpus directory')
@@ -1376,7 +1378,7 @@ def main(argv=None):
     if args.test and any(name not in known for name in args.test):
         parser.error('--test requires an EngineTests method name')
     try:
-        samples = [] if args.test else select_samples(args.corpus, args.sample_mode, args.seed)
+        samples = [] if args.test or args.self_contained else select_samples(args.corpus, args.sample_mode, args.seed)
         BATO_BIN, version = resolve_bato(args.bato_bin)
     except (OSError, ValueError) as error:
         parser.error(str(error))
