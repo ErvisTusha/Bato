@@ -42,10 +42,18 @@ impl NativeKind {
     fn filename(self) -> &'static str {
         match self {
             Self::Hip => {
-                if cfg!(windows) { "bato_hip.dll" } else { "libbato_hip.so" }
+                if cfg!(windows) {
+                    "bato_hip.dll"
+                } else {
+                    "libbato_hip.so"
+                }
             }
             Self::LevelZero => {
-                if cfg!(windows) { "bato_level_zero.dll" } else { "libbato_level_zero.so" }
+                if cfg!(windows) {
+                    "bato_level_zero.dll"
+                } else {
+                    "libbato_level_zero.so"
+                }
             }
             Self::Metal => "libbato_metal.dylib",
         }
@@ -188,7 +196,9 @@ impl WorkerNative {
         direction: Direction,
         selected: Option<NativeKind>,
     ) -> Result<Option<(Vec<u8>, String)>, GpuError> {
-        let total = self.plugins.iter()
+        let total = self
+            .plugins
+            .iter()
             .filter(|p| selected.is_none_or(|kind| p.kind == kind))
             .map(|p| p.devices as usize)
             .sum::<usize>();
