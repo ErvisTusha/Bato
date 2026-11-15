@@ -7,10 +7,9 @@ use super::{
     filters::{Direction, AUTO_MIN_BYTES, MAX_BYTES},
     GpuError,
 };
-use crate::core::{
-    memory::try_filled,
-    types::{BatoError, Compute, ExecutionStats, TransformId},
-};
+use crate::core::types::{BatoError, Compute, ExecutionStats, TransformId};
+#[cfg(any(feature = "cuda", feature = "wgpu"))]
+use crate::core::memory::try_filled;
 #[cfg(feature = "cuda")]
 use super::cuda::{self, Cuda};
 #[cfg(feature = "cuda")]
