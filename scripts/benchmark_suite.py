@@ -55,7 +55,7 @@ def main(argv=None, *, result_rows=None):
     parser.add_argument("--allow-unavailable", action="store_true", help="Record missing/failed tools and measure only ready codecs")
     parser.add_argument("--list-workloads", action="store_true", help="Print the manifest without generating fixtures, checking tools, or measuring")
     parser.add_argument("--workload", choices=["files", "directories", "both"], default="both")
-    parser.add_argument("--bato-compute", choices=["auto", "cpu", "cuda", "hip", "level-zero", "metal", "wgpu"],
+    parser.add_argument("--bato-compute", choices=["auto", "cpu", "cuda", "hip", "level-zero", "metal", "wgpu", "legacy"],
                         default="auto", help="Bato byte-filter backend (default: auto, all detected GPU devices plus CPU fallback)")
     parser.add_argument("--bato-bin", help="Path to the Rust Bato executable")
     parser.add_argument("--only-bato", action="store_true")
@@ -90,6 +90,10 @@ def main(argv=None, *, result_rows=None):
     parser.add_argument('--database', default=str(DEFAULT_DATABASE), help='Canonical SQLite measurement database')
     parser.add_argument('--init-db', action='store_true', help='Initialize database only; do not discover or benchmark inputs')
     args = parser.parse_args(argv)
+    # The old main-branch baseline predates --compute: retain its original
+    # behavior when benchmarking historical binaries against the new Auto default.
+    if args.bato_compute == "legacy":
+        args.bato_compute = None
     try:
         if result_rows is not None and (args.init_db or args.archive_operations):
             parser.error('Live results require a standard benchmark run')
