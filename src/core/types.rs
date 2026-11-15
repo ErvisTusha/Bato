@@ -161,10 +161,10 @@ impl ExecutionStats {
 /// Where eligible byte filters run. Every setting produces identical archives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Compute {
-    /// Try available CUDA and wgpu devices for large batches, with CPU fallback.
+    /// Try every available compiled GPU backend for large batches, with CPU fallback.
+    #[default]
     Auto,
     /// Run all filters on the CPU.
-    #[default]
     Cpu,
     /// Require CUDA for supported batches. A device failure is returned.
     Cuda,
