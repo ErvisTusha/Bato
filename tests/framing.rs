@@ -127,7 +127,7 @@ fn archive_header_flag_is_versioned_and_rejects_unknown_bits() {
             bytes.extend([major, minor, flags]);
             let result = read_stream_header(&mut Cursor::new(bytes));
             let allowed =
-                major == VERSION_MAJOR && matches!(minor, 22 | VERSION_MINOR) && flags <= 1;
+                major == VERSION_MAJOR && matches!(minor, 22..=VERSION_MINOR) && flags <= 1;
             assert_eq!(result.is_ok(), allowed, "{major}.{minor} flags={flags}");
             if let Ok(header) = result {
                 assert_eq!(

@@ -3,7 +3,7 @@ use std::io::Cursor;
 
 #[test]
 fn unsupported_stream_versions_are_rejected_before_payload_decode() {
-    for minor in (0..=u8::MAX).filter(|&minor| !matches!(minor, 22 | VERSION_MINOR)) {
+    for minor in (0..=u8::MAX).filter(|&minor| !matches!(minor, 22..=VERSION_MINOR)) {
         let mut header = [b'B', b'A', b'T', b'O', VERSION_MAJOR, VERSION_MINOR, 0];
         header[5] = minor;
         assert!(matches!(read_stream_header(&mut Cursor::new(header)),

@@ -1,7 +1,7 @@
-# Bato format 1.23
+# Bato format 1.24
 
 A `.bato` stream holds file bytes or a serialized directory tree. Bato 0.8
-writes format 1.23 and reads existing 1.22 streams.
+writes format 1.24 and reads existing 1.22 and 1.23 streams.
 
 The stream is a 10-byte header, zero or more blocks, and a footer. Fixed-width
 integers are little-endian. Variable integers are canonical unsigned LEB128:
@@ -14,7 +14,7 @@ follows; redundant leading zero groups and values exceeding u64 are rejected.
 |---|---|---|
 | 0 | 4 | `BATO` |
 | 4 | 1 | Major `1` |
-| 5 | 1 | Minor `23` for new streams, `22` for previous streams |
+| 5 | 1 | Minor `24` for new streams, `22` or `23` for earlier streams |
 | 6 | 1 | Flags: bit 0 directory archive; other bits zero |
 | 7 | 1 | Segment log2, 16..30 (default 26) |
 | 8 | 1 | CM chunk log2, 12..20, no greater than segment log2 (default 18) |
@@ -45,7 +45,7 @@ allocation. Blocks cannot cross segment boundaries.
 | 2 | Independent stored segment | Exactly `n` bytes, no model |
 | 3 | Independent literal/copy segment | `c` bytes of commands |
 | 4 | Independent static Huffman or spatial segment | `c` bytes of table and bits, or a spatial packet with transform 15 |
-| 5 | Huffman-coded literal/copy segment | Token-stream length variable integer, then static table and bits |
+| 5 | Entropy-coded literal/copy segment | Positive token-stream length for static Huffman, zero for a context-mixed fragment packet |
 | 6 | Repeated-byte segment | One byte repeated `n` times, `n >= 2` |
 | 7 | Contextual digit-run segment | Literal skeleton and integer streams |
 
@@ -102,6 +102,25 @@ nonzero padding are rejected. The original size determines decoded length.
 For type 5 the prefixed length determines decoded token bytes, bounded by
 `n + 10`, and the token decoder must then produce exactly `n` original bytes.
 The decoder builds one lookup table; it does no adaptive training.
+
+### Context-mixed fragment packets (type 5, format 1.24)
+
+A zero first variable integer selects the fragment packet. The outer
+transform must be zero and the outer primer flag clear. The packet then
+contains the positive token-stream length (strictly smaller than the
+original segment size), one primer byte (0 reads the primer, 1 skips it)
+and one transform byte (0, 1, 8, 11 or 12). The transform applies to the
+token stream.
+
+The decoded token stream uses the stream's normal CM chunk size. Each
+inner chunk begins with its coded length as a variable integer. A zero
+length means the chunk is stored raw, with its byte count inferred from
+the token-stream length and chunk geometry. A positive coded length must
+be smaller than that inferred byte count. Inner chunks have no checksum.
+After context decoding and applying the inverse transform, interpret the
+token stream as literal/copy commands to produce exactly the outer size.
+The outer CRC32C covers the reconstructed segment. Trailing token or
+packet bytes are invalid.
 
 ### Independent spatial packets (type 4, transform 15)
 

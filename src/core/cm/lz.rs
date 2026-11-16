@@ -4,7 +4,7 @@
 use super::varint;
 use crate::core::{memory::try_filled, types::BatoError};
 
-const MIN_MATCH: usize = 4;
+pub(super) const MIN_MATCH: usize = 4;
 const CANDIDATES: usize = 4;
 const MAX_BUCKETS: usize = 1 << 18;
 
@@ -20,7 +20,7 @@ fn insert(heads: &mut [[u32; CANDIDATES]], raw: &[u8], at: usize) {
     heads[slot].rotate_right(1);
     heads[slot][0] = (at + 1) as u32;
 }
-fn matched(raw: &[u8], a: usize, b: usize) -> usize {
+pub(super) fn matched(raw: &[u8], a: usize, b: usize) -> usize {
     let limit = raw.len() - b;
     let mut n = 0;
     while n + 8 <= limit {

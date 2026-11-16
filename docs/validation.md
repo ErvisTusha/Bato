@@ -1202,3 +1202,56 @@ The smaller standalone LZ packets produced no smaller CLI archive on this
 panel. Summed median packing wall and CPU time increased. The decode code
 and archive bytes were identical, so restore differences between these
 runs are timing variation. The pilot was dropped.
+
+### Context-mixed fragment packets with instruction normalization (format 1.24)
+
+The first pilot replaced exact repeats of at least 128 bytes with bounded
+literal/copy commands, then modeled the command stream without a
+transform. Its packet lost to the incumbent on all six screened
+workloads. The follow-up applied the existing instruction-normalization
+transform when its byte-pattern selector admitted the shortened stream.
+The encoder retains the existing candidates and compares their full
+framed costs. It skips the extra fragment CM trial if instruction
+normalization is ineligible. Copies never refer to bytes outside their
+segment.
+
+The baseline was the compressor at `190929d`. The CPU-only benchmark used
+automatic threads and geometry with a 7.2 GiB memory budget. The real Bato
+revision directory used an explicit 256 KiB segment and 64 KiB chunks on
+both builds. All directories were passed directly to `bato archive`.
+
+The edited Silesia directories each contain three versions of a 36 KiB
+slice. The base offsets are 310,123 in `nci` and 1,987,654 in `ooffice`.
+One version XORs 512 bytes starting halfway through the slice with
+`0x21`. Another inserts 311 bytes from offset 711,843 of `sao` at byte
+2,003. The independent executable check starts at file offset `0x22040`
+of the host Linux Python executable and takes 40 KiB. Its edits replace
+389 bytes at offset 19,387 with bytes from offset 923 of the same slice,
+or insert 733 bytes from offset 3,113 at offset 8,077. These three
+revision directories are constructed workloads. The other native
+directories contain the three real Bato source pairs used in the prior
+trial and codespan-reporting 0.13.1 sources. The standalone Silesia
+`mr` and `samba` slices start at bytes 3,299,191 and 5,020,771.
+
+Each input ran three alternating pairs. All 42 restorations matched the
+originals, and only the two edited executable directories chose the new
+blocks. Timing columns are per-workload medians in seconds.
+
+| Workload | Input bytes | Archive bytes before → after | Pack wall | Pack CPU | Restore wall | Restore CPU |
+|---|---:|---:|---:|---:|---:|---:|
+| Edited `nci` directory | 110,903 | 2,806 → 2,806 | 1.770 → 1.976 | 2.743 → 2.871 | 1.120 → 1.019 | 1.087 → 0.977 |
+| Edited `ooffice` directory | 110,903 | 15,557 → 13,591 | 2.125 → 2.784 | 3.237 → 4.001 | 1.271 → 0.416 | 1.247 → 0.381 |
+| Edited Python executable directory | 123,613 | 19,211 → 17,309 | 2.126 → 3.028 | 4.004 → 3.758 | 1.421 → 0.467 | 1.399 → 0.425 |
+| Real Bato revisions directory | 194,581 | 15,738 → 15,738 | 2.776 → 2.829 | 4.546 → 4.504 | 2.728 → 2.828 | 2.682 → 2.794 |
+| Codespan directory | 107,574 | 13,563 → 13,563 | 1.778 → 1.987 | 2.629 → 2.810 | 1.972 → 1.822 | 1.952 → 1.801 |
+| `mr` 64 KiB | 65,536 | 16,044 → 16,044 | 3.937 → 4.079 | 3.881 → 4.041 | 1.675 → 1.520 | 1.668 → 1.501 |
+| `samba` 128 KiB | 131,072 | 114,297 → 114,297 | 4.783 → 4.686 | 9.146 → 9.173 | 1.626 → 1.722 | 2.263 → 2.429 |
+| Sum of medians | 844,182 | 197,216 → 193,348 | 19.295 → 21.369 | 30.186 → 31.160 | 11.814 → 9.795 | 12.298 → 10.308 |
+
+The two fixed revision directories saved 12.6% and 9.9%, and their
+median restore wall time decreased by about 3×. Both packed more
+slowly by wall time. The other five workloads tied in size. Native
+listing, health, selected indexed extraction, and indexed recovery
+succeeded on the edited `ooffice` directory. The decoder restored its
+earlier format 1.23 archive and rejected a new fragment packet with a
+header falsely marked 1.23.

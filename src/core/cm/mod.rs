@@ -12,6 +12,7 @@ mod deflate;
 pub(crate) mod descriptor;
 mod fast;
 pub(crate) mod filters;
+mod fragments;
 mod hash;
 mod huffman;
 mod isse;

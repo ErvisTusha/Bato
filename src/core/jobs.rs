@@ -161,6 +161,14 @@ impl Job {
     ) -> Result<(), BatoError> {
         let (kind, options) = settings;
         let (mut part, resume) = self.prepare(section, input, Direction::Encode)?;
+        if resume.is_some() {
+            part.data.file.rewind()?;
+            let header = read_stream_header(&mut part.data.file)?;
+            if header.version_minor != super::types::VERSION_MINOR {
+                return Err(invalid("encoding checkpoint uses an earlier Bato format"));
+            }
+            part.data.file.seek(io::SeekFrom::End(0))?;
+        }
         compress_checkpointed(
             input,
             &mut part.data,

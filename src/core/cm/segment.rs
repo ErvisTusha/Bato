@@ -8,11 +8,11 @@ use super::{
     coder::{Decoder, Encoder},
     deflate::container,
     descriptor::Descriptor,
-    fast, filters,
+    fast, filters, fragments, lz,
     predictor::{self, pipeline, Engine, Predictor, Stages},
     profile::{Step, Timing},
     simd::Dispatch,
-    spatial, x86,
+    spatial, varint, x86,
 };
 use crate::core::{
     checksum::crc32c,
@@ -292,7 +292,36 @@ pub(crate) fn encode_segment(
     // Keep complete framed costs throughout: a winning deflate transform is
     // not proof that the raw CM candidate (or the x86 candidate) is worse.
     let mut winner = (cost, chunks, coding);
-    if let Some(payload) = spatial::encode(raw, cost.min(raw.len() - 1))? {
+    if let Some(tape) = timing.time(Step::FastCandidates, || fragments::commands(raw))? {
+        let packed = x86::select(&tape)?
+            .map(|sites| {
+                encode_fragment_packet(
+                    (&tape, sites.transform()),
+                    (descriptor, trials),
+                    winner.0,
+                    timing,
+                )
+            })
+            .transpose()?
+            .flatten();
+        for (kind, payload) in [(BlockType::LzHuffman, packed), (BlockType::Lz, Some(tape))] {
+            let Some(payload) = payload else { continue };
+            let cost = crate::core::frame::block_cost(kind, raw.len(), payload.len());
+            if cost < winner.0 {
+                winner = (
+                    cost,
+                    vec![Chunk {
+                        kind,
+                        length: raw.len() as u32,
+                        payload,
+                        crc: original_crc,
+                    }],
+                    plain(TransformId::None),
+                );
+            }
+        }
+    }
+    if let Some(payload) = spatial::encode(raw, winner.0.min(raw.len() - 1))? {
         let chunk = Chunk {
             kind: BlockType::Huffman,
             length: raw.len() as u32,
@@ -581,6 +610,101 @@ fn chunks_cost(chunks: &[Chunk]) -> usize {
         .sum()
 }
 
+/// A zero token-length field distinguishes this packet from static Huffman.
+fn encode_fragment_packet(
+    (tape, transform): (&[u8], TransformId),
+    (descriptor, trials): (Descriptor, Trials),
+    limit: usize,
+    timing: Timing<'_>,
+) -> Result<Option<Vec<u8>>, BatoError> {
+    let transformed;
+    let input = if transform == TransformId::None {
+        tape
+    } else {
+        transformed = filters::forward(tape, transform)?;
+        &transformed
+    };
+    let Some((cost, primer, chunks)) = model_candidate(
+        input,
+        (descriptor, trials, descriptor.segment_bytes()),
+        limit,
+        (timing, &mut Snapshot::new(false)),
+    )?
+    else {
+        return Ok(None);
+    };
+    let mut packet = try_capacity(cost + 3 + varint::len(tape.len() as u64))?;
+    packet.push(0);
+    varint::push(&mut packet, tape.len());
+    packet.push(u8::from(primer == Primer::Skipped));
+    packet.push(transform as u8);
+    for chunk in chunks {
+        let length = if chunk.kind == BlockType::Raw {
+            0
+        } else {
+            chunk.payload.len()
+        };
+        varint::push(&mut packet, length);
+        packet.extend_from_slice(&chunk.payload);
+    }
+    Ok(Some(packet))
+}
+
+fn decode_fragment_packet(
+    packet: &[u8],
+    descriptor: Descriptor,
+    length: usize,
+    timing: Timing<'_>,
+) -> Result<Vec<u8>, BatoError> {
+    let invalid = || BatoError::CorruptStream("invalid context-mixed fragments".into());
+    let mut at = 0;
+    let token_length = varint::take(packet, &mut at)?;
+    if token_length == 0 || token_length >= length {
+        return Err(invalid());
+    }
+    let primer = match packet.get(at) {
+        Some(0) => Primer::Read,
+        Some(1) => Primer::Skipped,
+        _ => return Err(invalid()),
+    };
+    let transform = TransformId::from_u8(*packet.get(at + 1).ok_or_else(invalid)?)?;
+    if transform != TransformId::None && x86::Sites::of_transform(transform).is_none() {
+        return Err(invalid());
+    }
+    at += 2;
+    let size = descriptor.chunk_bytes();
+    let mut chunks = try_capacity(token_length.div_ceil(size))?;
+    for position in (0..token_length).step_by(size) {
+        let n = size.min(token_length - position);
+        let coded = varint::take(packet, &mut at)?;
+        if coded >= n {
+            return Err(invalid());
+        }
+        let (kind, length) = if coded == 0 {
+            (BlockType::Raw, n)
+        } else {
+            (BlockType::Coded, coded)
+        };
+        let end = at.checked_add(length).ok_or_else(invalid)?;
+        let payload = try_copy(packet.get(at..end).ok_or_else(invalid)?)?;
+        chunks.push(Chunk {
+            kind,
+            length: n as u32,
+            payload,
+            crc: 0,
+        });
+        at = end;
+    }
+    if at != packet.len() {
+        return Err(invalid());
+    }
+    let mut tape = decode_chunks(&chunks, descriptor, token_length, (primer, timing))?;
+    timing.time(Step::InverseTransform, || {
+        filters::inverse(&mut tape, transform)?;
+        lz::decode(&tape, length)
+    })
+}
+
 /// Decodes one segment and reverses its declared transform. Chunk CRCs are
 /// verified on the original bytes.
 pub(crate) fn decode_segment(
@@ -635,6 +759,16 @@ pub(crate) fn decode_segment(
                 size: n,
                 limit: max_output.min(descriptor.segment_bytes()),
             });
+        }
+        if chunk.kind == BlockType::LzHuffman && chunk.payload.first() == Some(&0) {
+            if coding.transform != TransformId::None || coding.primer != Primer::Read {
+                return Err(BatoError::CorruptStream(
+                    "invalid fragment block flags".into(),
+                ));
+            }
+            let output = decode_fragment_packet(&chunk.payload[1..], descriptor, n, timing)?;
+            timing.time(Step::Checksum, || verify_chunks(chunks, &output))?;
+            return Ok(output);
         }
         fast::decode(chunk.kind, &chunk.payload, n)?
     } else {
@@ -915,6 +1049,43 @@ fn decode_chunks(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn fragment_packets_restore_and_validate_nested_lengths() {
+        let seed: Vec<u8> = (0u32..3000)
+            .flat_map(|n| n.wrapping_mul(0x9117_4f2d).to_le_bytes())
+            .collect();
+        let mut input = seed.clone();
+        input.extend_from_slice(b"an edit");
+        input.extend_from_slice(&seed[7..]);
+        input.extend_from_slice(b"a second edit");
+        input.extend_from_slice(&seed);
+        let descriptor = Descriptor::default();
+        let tape = fragments::commands(&input).unwrap().unwrap();
+        let payload = encode_fragment_packet(
+            (&tape, TransformId::None),
+            (descriptor, Trials::Sequential),
+            input.len(),
+            Timing::off(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(payload[0], 0);
+        let decoded =
+            decode_fragment_packet(&payload[1..], descriptor, input.len(), Timing::off()).unwrap();
+        assert_eq!(decoded, input);
+        assert!(decode_fragment_packet(
+            &payload[1..payload.len() - 1],
+            descriptor,
+            input.len(),
+            Timing::off()
+        )
+        .is_err());
+        assert!(
+            decode_fragment_packet(&payload[1..], descriptor, tape.len(), Timing::off()).is_err()
+        );
+    }
+
     use super::*;
 
     fn decode(

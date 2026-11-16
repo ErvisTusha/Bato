@@ -82,7 +82,7 @@ pub fn read_stream_header<R: Read>(r: &mut R) -> Result<StreamHeader, BatoError>
     if magic != MAGIC {
         return Err(BatoError::InvalidMagic(magic));
     }
-    if b[4] != VERSION_MAJOR || !matches!(b[5], 22 | VERSION_MINOR) {
+    if b[4] != VERSION_MAJOR || !matches!(b[5], 22..=VERSION_MINOR) {
         return Err(BatoError::UnsupportedVersion {
             major: b[4],
             minor: b[5],
@@ -465,6 +465,7 @@ fn encode_segments<R: Read, W: Write>(
 pub struct DecompressReader<R: Read> {
     reader: R,
     kind: StreamKind,
+    version_minor: u8,
     descriptor: Descriptor,
     short_final_chunk: bool,
     limits: DecodeLimits,
@@ -507,6 +508,7 @@ impl<R: Read> DecompressReader<R> {
         Ok(Self {
             reader,
             kind: header.kind,
+            version_minor: header.version_minor,
             descriptor,
             short_final_chunk: false,
             limits: o.limits.clone(),
@@ -611,6 +613,14 @@ impl<R: Read> DecompressReader<R> {
                 }
                 let mut payload = try_buffer(header.compressed_size as usize)?;
                 self.reader.read_exact(&mut payload)?;
+                if self.version_minor < 24
+                    && header.block_type == BlockType::LzHuffman
+                    && payload.first() == Some(&0)
+                {
+                    return Err(BatoError::CorruptStream(
+                        "fragment packet requires format 1.24".into(),
+                    ));
+                }
                 let mut crc = [0; BLOCK_CRC_BYTES as usize];
                 exact(&mut self.reader, &mut crc)?;
                 self.compressed += payload.len() as u64 + BLOCK_CRC_BYTES;
