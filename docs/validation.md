@@ -957,3 +957,14 @@ sets chosen by the first stage's context, rate shift 22 to 28). Dev set of six
 `434,301` bytes. Best blend `434,707` (+0.09%, rate 24, one weight set); the
 256-set variant `438,283` (+0.9%); rates 26 and above `496,512` to `745,484`.
 No size gain, and the extra mixer costs time. Reverted.
+
+## Rejected: per-file mixer learning-rate search (2026-11-16)
+
+Upper bound for an encoder that tries several learning-rate pairs and keeps the
+smallest archive. Six 400 KB dev files (csv, elf, exe, geojson, json, txt), one
+thread, first-layer/expert rate (MR) and final rate (FR) as shift pairs
+(23,24 is the current default, total `434,301` bytes). Pairs tried: (22,24),
+(24,24), (23,23), (23,25), (22,23), (24,25). The best pair per file is the
+default for five files; only csv gains (`30,276` to `30,171`, -0.35%) and exe
+(`116,128` to `116,099`). Best per-file total `434,167` bytes, -0.03%. The rates
+are already near the optimum, so a search costs encode time for no size.
