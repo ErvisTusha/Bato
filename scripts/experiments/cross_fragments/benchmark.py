@@ -12,7 +12,7 @@ parser = argparse.ArgumentParser(description="Compare native Bato with the cross
 for name in ("main", "branch", "helper", "output"):
     parser.add_argument(f"--{name}", type=Path, required=True)
 parser.add_argument("--input", type=Path, action="append", required=True)
-parser.add_argument("--variants", nargs="+", choices=["main", "branch", "solid", "wide", "narrow"],
+parser.add_argument("--variants", nargs="+", choices=["main", "branch", "solid", "wide", "narrow", "512k", "1m"],
                     default=["main", "branch", "solid"])
 parser.add_argument("--repetitions", type=int, default=3)
 parser.add_argument("--memory-budget", type=int, default=7730941132)
@@ -24,7 +24,7 @@ output = args.output.resolve()
 if any(output.is_relative_to(path.resolve()) for path in args.input):
     parser.error("output must be outside the input trees")
 options = ["--threads", "0", "--memory-budget", str(args.memory_budget)]
-geometry = {"solid": 262144, "wide": 131072, "narrow": 65536}
+geometry = {"solid": 262144, "wide": 131072, "narrow": 65536, "512k": 524288, "1m": 1048576}
 tag = b"BTD1\x00"
 
 def inventory(tree):
@@ -59,7 +59,7 @@ def pack(variant, source, tmp):
         if (staged / "recipes").exists():
             native = tmp / "compact.bato"
             size = str(geometry[variant])
-            call(binary, "archive", staged, "-o", native, "--segment-size", size, "--chunk-size", size)
+            call(binary, "archive", staged, "-o", native, "--segment-size", size, "--chunk-size", str(min(int(size), 262144)))
             wrapped(native, out)
             saved = 1
         else:
