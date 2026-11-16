@@ -1086,3 +1086,30 @@ Seven paired decodes of that same archive gave median wall times of
 0.806 s before and 0.692 s after, and median CPU times of 2.227 s before
 and 1.784 s after. Wall time varied across pairs. Each decode was compared
 with the original via `cmp`. Both spatial unit tests passed in release mode.
+
+### Compact geometry and exact trial limits
+
+With a 256 MiB working-memory budget, default geometry previously
+rejected the 11,150-byte `fields.c` and the 49,066-byte Rust model
+directory. Known short inputs now keep one segment sized to their
+length. Directory admission runs after counting the native catalogue
+records. Both workloads packed and restored with the default settings
+under the same budget. Their archives were identical to those from
+explicit 64 KiB geometry on `1e20cf1`: 2,144 B and 9,549 B.
+
+The parallel primed and unprimed trials now share their best completed
+size. Pruning uses bytes already emitted and a conservative lower bound
+that includes the cheaper raw header. Primed results retain tie priority.
+On three alternating `progl` pairs at fixed 128 MiB geometry with two
+workers, the archives were identical. Median pack wall time was 1.803 s
+before and 1.523 s after. Median pack CPU time was 2.450 s and 2.332 s.
+These timings cover one small workload.
+
+Three pairs across eight files and three native directory trees passed
+66 round trips. The panel tied at 226,389 bytes. Summed per-workload
+median pack wall/CPU seconds were 21.548/75.056 before and
+22.778/71.313 after. Restore wall/CPU seconds were 14.848/29.860 before
+and 15.087/31.372 after. These results establish no general wall-time gain.
+The `ptt5` archive was byte-identical. Its 10,542 spatial payload bytes
+now appear in their own category. Profile step times are labelled as
+summed elapsed durations.

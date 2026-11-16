@@ -50,6 +50,10 @@ impl Encoder {
         })
     }
 
+    pub(super) fn emitted(&self) -> usize {
+        self.bytes.len()
+    }
+
     pub(super) fn exceeded(&self) -> bool {
         self.exceeded
     }

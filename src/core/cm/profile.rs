@@ -176,6 +176,8 @@ pub(crate) enum Part {
     BlockChecksums,
     Footer,
     Coded,
+    Spatial,
+    Independent,
     Stored,
 }
 
@@ -188,6 +190,8 @@ impl Part {
         Part::BlockChecksums,
         Part::Footer,
         Part::Coded,
+        Part::Spatial,
+        Part::Independent,
         Part::Stored,
     ];
 
@@ -198,7 +202,9 @@ impl Part {
             Part::BlockChecksums => "block checksums (4 bytes each)",
             Part::Footer => "footer (length and checksum)",
             Part::Coded => "model-coded payload",
-            Part::Stored => "stored payload (not modelled)",
+            Part::Spatial => "spatial-coded payload",
+            Part::Independent => "independent compressed payload",
+            Part::Stored => "uncompressed payload",
         }
     }
 }
@@ -456,7 +462,7 @@ impl fmt::Display for TimingReport {
                 }
             }
         }
-        writeln!(f, "step timing, cpu time summed over all threads")?;
+        writeln!(f, "step timing, elapsed durations summed across workers")?;
         writeln!(
             f,
             "{:<40} {:>10} {:>7} {:>9}",

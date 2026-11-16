@@ -2,6 +2,8 @@
 //! Provenance: Bato's supplied chunk/segment design and the original sibling
 //! coder and predictor; no third-party implementation is incorporated.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use super::{
     coder::{Decoder, Encoder},
     deflate::container,
@@ -55,6 +57,7 @@ struct Run<'a> {
     primer: Primer,
     dispatch: Dispatch,
     budget: Option<usize>,
+    incumbent: Option<&'a AtomicUsize>,
     /// Largest input the run accepts: the segment size, or for deflate-
     /// transformed bytes `DEFLATE_EXPANSION` times that.
     max_bytes: usize,
@@ -311,7 +314,7 @@ pub(crate) fn encode_segment(
             .step_by(descriptor.chunk_bytes())
             .map(|start| {
                 crate::core::frame::block_cost(
-                    BlockType::Coded,
+                    BlockType::Raw,
                     (len - start).min(descriptor.chunk_bytes()),
                     0,
                 )
@@ -521,13 +524,14 @@ fn model_candidate(
     };
     let stages = trials.stages(models);
     let run = |primer,
-               cap,
+               (cap, incumbent),
                snapshot: Option<&mut Snapshot>|
      -> Result<Option<(usize, Primer, Vec<Chunk>)>, BatoError> {
         let run = Run {
             primer,
             dispatch: Dispatch::Native,
             budget: Some(cap),
+            incumbent,
             max_bytes,
             timing,
             stages,
@@ -536,22 +540,33 @@ fn model_candidate(
         Ok(chunks.map(|chunks| (chunks_cost(&chunks), primer, chunks)))
     };
     let outcomes: Vec<Option<(usize, Primer, Vec<Chunk>)>> = if input.len() > UNPRIMED_TRIAL_BYTES {
-        vec![run(Primer::Read, limit, Some(snapshot))?]
+        vec![run(Primer::Read, (limit, None), Some(snapshot))?]
     } else if trials.is_parallel() {
+        let incumbent = AtomicUsize::new(limit);
         let (primed, unprimed) = std::thread::scope(|scope| {
-            let unprimed = scope.spawn(|| run(Primer::Skipped, limit, None));
-            (run(Primer::Read, limit, Some(snapshot)), unprimed.join())
+            let unprimed = scope.spawn(|| {
+                let result = run(Primer::Skipped, (limit, Some(&incumbent)), None)?;
+                if let Some((cost, ..)) = &result {
+                    incumbent.fetch_min(*cost, Ordering::Relaxed);
+                }
+                Ok::<_, BatoError>(result)
+            });
+            let primed = run(Primer::Read, (limit, Some(&incumbent)), Some(snapshot));
+            if let Ok(Some((cost, ..))) = &primed {
+                incumbent.fetch_min(*cost, Ordering::Relaxed);
+            }
+            (primed, unprimed.join())
         });
         let unprimed =
             unprimed.map_err(|_| BatoError::CorruptStream("model trial thread panicked".into()))?;
         vec![primed?, unprimed?]
     } else {
-        let primed = run(Primer::Read, limit, Some(snapshot))?;
+        let primed = run(Primer::Read, (limit, None), Some(snapshot))?;
         // The unprimed trial can only win by being strictly cheaper. Passing
         // this proven bound avoids modeling its remaining bytes after it can
         // no longer win; it does not change the winner or archive format.
         let cap = primed.as_ref().map_or(limit, |(cost, ..)| *cost);
-        let unprimed = run(Primer::Skipped, cap, None)?;
+        let unprimed = run(Primer::Skipped, (cap, None), None)?;
         vec![primed, unprimed]
     };
     let mut cheapest: Option<(usize, Primer, Vec<Chunk>)> = None;
@@ -668,6 +683,7 @@ fn encode_with_dispatch(
         primer: Primer::Read,
         dispatch,
         budget: None,
+        incumbent: None,
         max_bytes: descriptor.segment_bytes(),
         timing: Timing::off(),
         stages: Stages::Serial,
@@ -713,11 +729,23 @@ fn encode_model(
     history.extend_from_slice(primer);
     history.extend_from_slice(raw);
     let geometry = (&history[..], primer.len());
+    let cap = || match run.incumbent {
+        Some(incumbent) => {
+            // The primed trial wins equal costs. The static limit is always strict.
+            let best = incumbent.load(Ordering::Relaxed);
+            Some(
+                run.budget
+                    .unwrap_or(usize::MAX)
+                    .min(best.saturating_add(usize::from(run.primer == Primer::Read))),
+            )
+        }
+        None => run.budget,
+    };
     if run.stages == Stages::Pipelined {
         // The stage threads carry no step timer; `--timing` runs serially.
         return run.timing.time(Step::ModelTrial, || {
             pipeline::run_staged(model, geometry, |engine| {
-                encode_chunks(raw, geometry, descriptor, (engine, run.budget))
+                encode_chunks(raw, geometry, descriptor, (engine, &cap))
             })?
         });
     }
@@ -729,7 +757,7 @@ fn encode_model(
             raw,
             geometry,
             descriptor,
-            (&mut Engine::Serial(&mut model), run.budget),
+            (&mut Engine::Serial(&mut model), &cap),
         )
     });
     model.finish_meter(run.timing);
@@ -740,7 +768,7 @@ fn encode_chunks(
     raw: &[u8],
     (history, primed): (&[u8], usize),
     descriptor: Descriptor,
-    (model, budget): (&mut Engine<'_>, Option<usize>),
+    (model, budget): (&mut Engine<'_>, &impl Fn() -> Option<usize>),
 ) -> Result<Option<Vec<Chunk>>, BatoError> {
     let size = descriptor.chunk_bytes();
     let mut output = try_capacity(raw.len().div_ceil(size))?;
@@ -748,15 +776,22 @@ fn encode_chunks(
     let mut spent = 0usize;
     let mut minimum: usize = raw
         .chunks(size)
-        .map(|b| crate::core::frame::block_cost(BlockType::Coded, b.len(), 0))
+        .map(|b| crate::core::frame::block_cost(BlockType::Raw, b.len(), 0))
         .sum();
     for bytes in raw.chunks(size) {
-        let base = crate::core::frame::block_cost(BlockType::Coded, bytes.len(), 0);
-        let allowed = budget.map_or(bytes.len() - 1, |cap| {
+        let base = crate::core::frame::block_cost(BlockType::Raw, bytes.len(), 0);
+        let allowed = budget().map_or(bytes.len() - 1, |cap| {
             cap.saturating_sub(spent + minimum).min(bytes.len() - 1)
         });
         let mut coder = Encoder::new(allowed)?;
-        for &byte in bytes {
+        for (index, &byte) in bytes.iter().enumerate() {
+            // Already emitted bytes cannot be removed. The raw fallback for
+            // this chunk is at least as large, including its framing.
+            if index.is_multiple_of(64)
+                && budget().is_some_and(|cap| spent + minimum + coder.emitted() >= cap)
+            {
+                return Ok(None);
+            }
             for shift in (0..8).rev() {
                 let bit = (byte >> shift) & 1;
                 let probability = model.probability(&history[..primed + position])?;
@@ -786,7 +821,7 @@ fn encode_chunks(
         };
         minimum -= base;
         spent += crate::core::frame::block_cost(chunk.kind, bytes.len(), chunk.payload.len());
-        if budget.is_some_and(|cap| spent + minimum >= cap) {
+        if budget().is_some_and(|cap| spent + minimum >= cap) {
             return Ok(None);
         }
         output.push(chunk);
@@ -942,6 +977,7 @@ mod tests {
             primer: Primer::Read,
             dispatch: Dispatch::Native,
             budget: None,
+            incumbent: None,
             max_bytes: descriptor.segment_bytes(),
             timing: Timing::off(),
             stages: Stages::Serial,
@@ -956,6 +992,35 @@ mod tests {
     }
 
     #[test]
+    fn shared_trial_bound_keeps_the_sequential_winner() {
+        let descriptor = geometry();
+        let raw = b"integer context mixer reference text\n".repeat(1200);
+        let trial = |trials| {
+            model_candidate(
+                &raw,
+                (descriptor, trials, descriptor.segment_bytes()),
+                raw.len(),
+                (Timing::off(), &mut Snapshot::new(false)),
+            )
+            .unwrap()
+            .unwrap()
+        };
+        let (cost, primer, chunks) = trial(Trials::Sequential);
+        let (other_cost, other_primer, other_chunks) = trial(Trials::Parallel { reservations: 2 });
+        assert_eq!((cost, primer), (other_cost, other_primer));
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|c| c.payload.as_slice())
+                .collect::<Vec<_>>(),
+            other_chunks
+                .iter()
+                .map(|c| c.payload.as_slice())
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
     fn unprimed_segments_round_trip_and_differ_from_primed_ones() {
         let descriptor = geometry();
         let raw = b"integer context mixer reference text\n".repeat(100);
@@ -964,6 +1029,7 @@ mod tests {
                 primer,
                 dispatch: Dispatch::Native,
                 budget: None,
+                incumbent: None,
                 max_bytes: descriptor.segment_bytes(),
                 timing: Timing::off(),
                 stages: Stages::Serial,

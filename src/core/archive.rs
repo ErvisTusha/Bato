@@ -358,14 +358,7 @@ pub fn create_solid_archive_excluding<P: AsRef<Path>, W: Write>(
 ) -> Result<usize, BatoError> {
     let host = HostBudget::new(o.memory_budget, &o.execution.stats)?;
     let _metadata = host.reserve(INVENTORY_METADATA + 512 * 1024)?;
-    super::codec::admit(
-        (
-            o.geometry.descriptor()?,
-            super::cm::segment::Direction::Encode,
-        ),
-        host.available(),
-        &o.execution,
-    )?;
+    o.validate()?;
     with_catalogue(dir.as_ref(), excluded, |input, length| {
         let sized = CompressionOptions {
             input_length: Some(length),
@@ -468,15 +461,22 @@ fn with_catalogue<T>(
         expected_files: &expected_files,
         started: false,
     };
-    // The catalogue stream is these entries plus a few bytes of header each,
-    // so this is a deterministic estimate of its length; duplicates add none.
-    let length = input.stage.len() as u64
-        + expected_files
-            .iter()
-            .zip(&duplicates)
-            .filter(|(_, duplicate)| duplicate.is_none())
-            .map(|(file, _)| file.0)
-            .sum::<u64>();
+    // Directory headers are already in the prefix. Each member has a tag,
+    // path length and path, size, CRC, and either bytes or a duplicate ID.
+    let length = fs_
+        .iter()
+        .zip(expected_files.iter().zip(&duplicates))
+        .try_fold(
+            input.stage.len() as u64 + 1, // Include the end marker.
+            |length, ((_, name), ((size, _, _), duplicate))| {
+                length
+                    .checked_add(15 + name.len() as u64)
+                    .and_then(|length| {
+                        length.checked_add(if duplicate.is_some() { 4 } else { *size })
+                    })
+                    .ok_or_else(|| BatoError::InvalidOptions("catalogue size overflow".into()))
+            },
+        )?;
     let result = consume(&mut input, length)?;
     root_guard.verify().map_err(err)?;
     Ok(result)
@@ -934,6 +934,22 @@ pub(crate) fn validate_path(p: &str) -> Result<(), BatoError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn catalogue_length_includes_paths_duplicates_and_end_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("nested")).unwrap();
+        fs::write(dir.path().join("original"), b"shared bytes").unwrap();
+        fs::write(dir.path().join("nested/duplicate"), b"shared bytes").unwrap();
+        fs::write(dir.path().join("empty"), []).unwrap();
+        with_catalogue(dir.path(), &[], |reader, expected| {
+            let mut catalogue = Vec::new();
+            reader.read_to_end(&mut catalogue)?;
+            assert_eq!(expected, catalogue.len() as u64);
+            Ok(())
+        })
+        .unwrap();
+    }
+
     #[test]
     fn append_after_declared_bytes_is_detected() {
         let t = tempfile::tempdir().unwrap();

@@ -435,12 +435,17 @@ impl Geometry {
     /// and decode 1.8x faster, 4 cost +3.6% and 3.0x, 8 cost +6.2% and 3.3x.
     /// Other segment sizes are kept.
     pub fn for_input(self, length: u64, workers: usize) -> Geometry {
-        if self.segment_size != DEFAULT_SEGMENT_SIZE || length < 2 * MIN_AUTO_SEGMENT as u64 {
+        if self.segment_size != DEFAULT_SEGMENT_SIZE {
             return self;
         }
-        let share = length.div_ceil(workers.max(1) as u64);
-        let segment = usize::try_from(share.next_power_of_two()).unwrap_or(DEFAULT_SEGMENT_SIZE);
-        let segment_size = segment.clamp(MIN_AUTO_SEGMENT, DEFAULT_SEGMENT_SIZE);
+        let share = if length < 2 * MIN_AUTO_SEGMENT as u64 {
+            length
+        } else {
+            length.div_ceil(workers.max(1) as u64)
+        };
+        let segment_size = (share.clamp(MIN_AUTO_SEGMENT as u64, DEFAULT_SEGMENT_SIZE as u64)
+            as usize)
+            .next_power_of_two();
         Geometry {
             segment_size,
             // A chunk never exceeds its segment.
@@ -534,4 +539,29 @@ impl Default for DecodeLimits {
 pub struct DecompressionOptions {
     pub limits: DecodeLimits,
     pub execution: ExecutionOptions,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_inputs_keep_one_segment_with_compact_header_geometry() {
+        for workers in [1, 9] {
+            for (length, expected) in [
+                (0, 65536),
+                (65536, 65536),
+                (65537, 131072),
+                (131071, 131072),
+            ] {
+                let geometry = Geometry::default().for_input(length, workers);
+                assert_eq!(geometry.segment_size, expected);
+                geometry.validate().unwrap();
+            }
+        }
+        Geometry::default()
+            .for_input(u64::MAX, 1)
+            .validate()
+            .unwrap();
+    }
 }

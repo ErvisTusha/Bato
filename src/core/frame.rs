@@ -410,10 +410,11 @@ fn encode_segments<R: Read, W: Write>(
             );
             compressed += cost as u64;
             let timing = o.execution.stats.timing();
-            let payload = if result.header.block_type == BlockType::Coded {
-                Part::Coded
-            } else {
-                Part::Stored
+            let payload = match result.header.block_type {
+                _ if result.header.transform_id == TransformId::Spatial => Part::Spatial,
+                BlockType::Coded => Part::Coded,
+                BlockType::Raw | BlockType::Stored => Part::Stored,
+                _ => Part::Independent,
             };
             timing.part(payload, result.bytes.len());
             timing.part(Part::BlockChecksums, BLOCK_CRC_BYTES as usize);
