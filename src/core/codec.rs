@@ -174,7 +174,7 @@ pub(crate) struct Pool {
     pub admission: Admission,
     host: Arc<HostBudget>,
     job_memory: usize,
-    parallel_trials_fit: bool,
+    parallel_trials_memory: Option<usize>,
     _infrastructure: MemoryLease,
 }
 
@@ -214,8 +214,8 @@ impl Pool {
             admission,
             host,
             job_memory: segment::memory_required(descriptor, direction)?,
-            parallel_trials_fit: direction == Direction::Encode
-                && segment::parallel_trials_fit(descriptor),
+            parallel_trials_memory: (direction == Direction::Encode)
+                .then(|| segment::parallel_trials_memory(descriptor)),
             _infrastructure: infrastructure,
         })
     }
@@ -224,15 +224,23 @@ impl Pool {
         self.admission.workers
     }
 
-    /// Two trials only run concurrently when the normal worker reservation
-    /// covers both full predictor states. Otherwise the same compression
-    /// candidates run sequentially with no extra memory requirement.
+    /// Allow parallel trials when their memory fits in the reservations held
+    /// by the segment. Newly eligible tail jobs get two trial threads.
     pub(crate) fn trials(&self, reservations: usize) -> Trials {
-        if self.capacity() > 1 && self.parallel_trials_fit {
-            Trials::Parallel { reservations }
-        } else {
-            Trials::Sequential
+        let Some(required) = self.parallel_trials_memory else {
+            return Trials::Sequential;
+        };
+        if self.capacity() == 1 || required > self.job_memory.saturating_mul(reservations) {
+            return Trials::Sequential;
         }
+        let reservations = if required > self.job_memory {
+            // Idle workers cover both trials. Keep the stage pipeline off in
+            // this case, where short inputs favor the two independent trials.
+            2
+        } else {
+            reservations
+        };
+        Trials::Parallel { reservations }
     }
 
     pub fn outstanding(&self) -> usize {
@@ -344,8 +352,10 @@ mod tests {
     fn parallel_trials_respect_the_existing_worker_budget() {
         // Small geometries keep their original admission floor and execute
         // the same candidate search sequentially if two models do not fit.
-        assert!(!segment::parallel_trials_fit(descriptor()));
-        assert!(segment::parallel_trials_fit(Descriptor::default()));
+        for (geometry, fits) in [(descriptor(), false), (Descriptor::default(), true)] {
+            let reserved = segment::memory_required(geometry, Direction::Encode).unwrap();
+            assert_eq!(reserved >= segment::parallel_trials_memory(geometry), fits);
+        }
     }
 
     #[test]
@@ -423,6 +433,16 @@ mod tests {
         let mut pool = Pool::new((descriptor(), Direction::Encode), host, &options).unwrap();
         let mut sole = pool.prepare_job().unwrap();
         assert_eq!(pool.lend_idle_workers(&mut sole), 3);
+        assert_eq!(pool.trials(1), Trials::Sequential);
+        let required = segment::parallel_trials_memory(descriptor());
+        assert_eq!(
+            pool.trials(3),
+            if required <= 3 * pool.job_memory {
+                Trials::Parallel { reservations: 2 }
+            } else {
+                Trials::Sequential
+            }
+        );
         let first = pool.prepare_job().unwrap();
         pool.submit(
             Work::Encode {

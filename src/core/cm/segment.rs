@@ -220,13 +220,9 @@ pub(crate) fn memory_required(
     )
 }
 
-/// Parallel primed/unprimed trials share a worker's existing reservation.
-/// If two predictors do not fit, run the same two candidates sequentially.
-/// This retains low-memory configurations and does not change coded bytes.
-pub(crate) fn parallel_trials_fit(descriptor: Descriptor) -> bool {
-    let Ok(reserved) = memory_required(descriptor, Direction::Encode) else {
-        return false;
-    };
+/// Bytes needed to run primed and unprimed trials side by side, including
+/// the largest modeled DEFLATE expansion for which both trials run.
+pub(crate) fn parallel_trials_memory(descriptor: Descriptor) -> usize {
     let segment = descriptor.segment_bytes();
     let chunk = descriptor.chunk_bytes();
     let trial_input = segment
@@ -234,8 +230,7 @@ pub(crate) fn parallel_trials_fit(descriptor: Descriptor) -> bool {
         .min(UNPRIMED_TRIAL_BYTES);
     let per_trial = predictor::memory_required(trial_input + PRIMER.len(), descriptor.table_log2)
         .saturating_add(2 * trial_input + PRIMER.len() + 2 * chunk + WORKER_SLACK);
-    let required = 2usize.saturating_mul(per_trial).saturating_add(4 * segment);
-    reserved >= required
+    2usize.saturating_mul(per_trial).saturating_add(4 * segment)
 }
 
 /// Whether `models` predictors for inputs of `length` bytes fit in the

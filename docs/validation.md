@@ -1113,3 +1113,22 @@ and 15.087/31.372 after. These results establish no general wall-time gain.
 The `ptt5` archive was byte-identical. Its 10,542 spatial payload bytes
 now appear in their own category. Profile step times are labelled as
 summed elapsed durations.
+
+### Use idle worker reservations for the final segment
+
+The queue could lend its idle workers' reservations to the final segment,
+but the trial scheduler still tested whether both predictors fit in one
+worker's reservation. The scheduler now checks the reservations actually
+held. Newly eligible jobs run two independent trials and leave the extra
+pipeline stages off. A single admitted worker retains sequential trials.
+The focused reservation test passed. A 256 MiB CLI check restored
+`fields.c` and produced the same archive as `a6ac9b6`.
+
+Three alternating pairs on each of `progl`, `fields.c`, `cp.html`, and the
+complete Python test and Rust models directories passed all 30 round trips.
+Every archive matched the previous build byte for byte. The host had nine
+logical CPUs available. Per-workload median pack wall seconds were
+2.400 → 1.822, 1.270 → 1.019, 1.620 → 1.219, 2.468 → 2.777, and
+1.863 → 1.370, respectively. Summed pack wall time was 9.620 → 8.207 s,
+and pack CPU time was 12.874 → 13.245 s. This is a small local performance
+panel. The Python test directory took longer to pack.
