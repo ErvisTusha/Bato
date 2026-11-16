@@ -3,11 +3,13 @@
 use std::{
     collections::HashMap,
     env, fs,
-    io::{self, ErrorKind, Read},
+    io::{self, ErrorKind, Read, Write},
     path::{Component, Path, PathBuf},
 };
 
 const LIMIT: usize = 8 * 1024 * 1024;
+const MAX_WINDOW: usize = 1 << 30;
+const MAX_MEMBERS: usize = 4096;
 const MIN_COPY: usize = 192;
 const MAX_RUNS: usize = 1 << 14;
 
@@ -150,78 +152,146 @@ fn read_bounded(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
     Ok(data)
 }
 
-fn prepare(root: &Path, stage: &Path) -> io::Result<()> {
-    let (dirs, files) = inventory(root)?;
-    let payload = stage.join("payload");
-    let mut total = 0usize;
-    for path in &files {
-        let length =
-            usize::try_from(fs::metadata(root.join(path))?.len()).map_err(|_| invalid())?;
-        total = total.saturating_add(length);
-        if total > LIMIT || files.len() > 4096 {
-            return Ok(());
-        }
-    }
-    let mut prior = Vec::<Vec<u8>>::new();
-    let mut encoded = Vec::new();
+struct Factored {
+    literals: Vec<Option<Vec<u8>>>,
+    recipes: Vec<u8>,
+    count: usize,
+}
+
+fn factor_members(raw: &[Vec<u8>], limit: usize) -> Factored {
+    let mut literals = Vec::with_capacity(raw.len());
     let mut index = HashMap::<u64, [Option<Spot>; 2]>::new();
     let mut recipes = Vec::new();
     let mut count = 0;
-    let mut remaining = LIMIT;
-    for (id, path) in files.iter().enumerate() {
-        let raw = read_bounded(&root.join(path), remaining)?;
-        remaining -= raw.len();
-        let duplicate = prior.iter().position(|other| other == &raw);
-        let (literals, commands) = if duplicate.is_none() {
-            factor(&raw, &prior, &index)
-        } else {
+    for (id, member) in raw.iter().enumerate() {
+        let previous = &raw[..id];
+        let duplicate = previous.iter().any(|other| other == member);
+        let (residual, commands) = if duplicate {
             (Vec::new(), Vec::new())
+        } else {
+            factor(member, previous, &index)
         };
-        let use_recipe =
-            literals.len() + 16 * commands.len() + 24 < raw.len() * 3 / 4 && !commands.is_empty();
+        let use_recipe = residual.len() + 16 * commands.len() + 24 < member.len() * 3 / 4
+            && !commands.is_empty();
         if use_recipe {
             count += 1;
             push(&mut recipes, id);
-            push(&mut recipes, raw.len());
+            push(&mut recipes, member.len());
             push(&mut recipes, commands.len());
             for command in commands {
                 for value in command {
                     push(&mut recipes, value as usize);
                 }
             }
-            encoded.push(Some(literals));
+            literals.push(Some(residual));
         } else {
-            encoded.push(None);
+            literals.push(None);
         }
-        if duplicate.is_none() {
-            for offset in 0..raw.len().saturating_sub(MIN_COPY - 1) {
-                if let Some(key) = anchor(&raw, offset) {
-                    let spots = index.entry(key).or_default();
-                    *spots = [Some((id, offset)), spots[0]];
+        if !duplicate {
+            for offset in 0..member.len().saturating_sub(MIN_COPY - 1) {
+                if let Some(key) = anchor(member, offset) {
+                    let spot = Some((id, offset));
+                    if let Some(spots) = index.get_mut(&key) {
+                        *spots = [spot, spots[0]];
+                    } else if index.len() < limit / 16 {
+                        index.insert(key, [spot, None]);
+                    }
                 }
             }
         }
-        prior.push(raw);
     }
-    if count == 0 {
-        return Ok(());
+    Factored {
+        literals,
+        recipes,
+        count,
     }
+}
+
+fn write_group(
+    root: &Path,
+    (dirs, files): (&[PathBuf], &[PathBuf]),
+    raw: &[Vec<u8>],
+    factored: Factored,
+) -> io::Result<()> {
+    let payload = root.join("payload");
     fs::create_dir_all(&payload)?;
     for dir in dirs {
         fs::create_dir_all(payload.join(dir))?;
     }
-    let mut manifest = Vec::new();
-    push(&mut manifest, files.len());
     for (id, path) in files.iter().enumerate() {
         relative(path)?;
         fs::write(
             payload.join(path),
-            encoded[id].as_deref().unwrap_or(&prior[id]),
+            factored.literals[id].as_deref().unwrap_or(&raw[id]),
         )?;
     }
-    push(&mut manifest, count);
-    manifest.extend(recipes);
-    fs::write(stage.join("recipes"), manifest)
+    let mut manifest = Vec::new();
+    push(&mut manifest, files.len());
+    push(&mut manifest, factored.count);
+    manifest.extend(factored.recipes);
+    fs::write(root.join("recipes"), manifest)
+}
+
+fn prepare(root: &Path, stage: &Path) -> io::Result<()> {
+    let (dirs, files) = inventory(root)?;
+    if files.len() > MAX_MEMBERS {
+        return Ok(());
+    }
+    let mut remaining = LIMIT;
+    for path in &files {
+        let length =
+            usize::try_from(fs::metadata(root.join(path))?.len()).map_err(|_| invalid())?;
+        let Some(next) = remaining.checked_sub(length) else {
+            return Ok(());
+        };
+        remaining = next;
+    }
+    remaining = LIMIT;
+    let mut raw = Vec::with_capacity(files.len());
+    for path in &files {
+        let bytes = read_bounded(&root.join(path), remaining)?;
+        remaining -= bytes.len();
+        raw.push(bytes);
+    }
+    let factored = factor_members(&raw, LIMIT);
+    if factored.count == 0 {
+        return Ok(());
+    }
+    write_group(stage, (&dirs, &files), &raw, factored)
+}
+
+fn prepare_file(source: &Path, stage: &Path, piece: usize, window: usize) -> io::Result<bool> {
+    if piece == 0 || piece > window || window > MAX_WINDOW {
+        return Err(invalid());
+    }
+    let mut source = io::BufReader::new(fs::File::open(source)?);
+    let mut changed = false;
+    for group in 0..u64::MAX {
+        let mut raw = Vec::new();
+        let mut remaining = window;
+        while remaining != 0 && raw.len() < MAX_MEMBERS {
+            let mut bytes = Vec::new();
+            (&mut source)
+                .take(remaining.min(piece) as u64)
+                .read_to_end(&mut bytes)?;
+            if bytes.is_empty() {
+                break;
+            }
+            remaining -= bytes.len();
+            raw.push(bytes);
+        }
+        if raw.is_empty() {
+            return Ok(changed);
+        }
+        let names: Vec<_> = (0..raw.len())
+            .map(|id| PathBuf::from(format!("{id:08}")))
+            .collect();
+        let factored = factor_members(&raw, window);
+        changed |= factored.count != 0;
+        let path = stage.join(format!("{group:012}"));
+        write_group(&path, (&[], &names), &raw, factored)?;
+    }
+    Err(invalid())
 }
 
 fn take<'a>(input: &mut &'a [u8], size: usize) -> io::Result<&'a [u8]> {
@@ -249,10 +319,15 @@ fn number(input: &mut &[u8]) -> io::Result<usize> {
     Err(invalid())
 }
 
-fn rebuild(input: &mut &[u8], literals: &[u8], prior: &[Vec<u8>]) -> io::Result<Vec<u8>> {
+fn rebuild(
+    input: &mut &[u8],
+    literals: &[u8],
+    prior: &[Vec<u8>],
+    limit: usize,
+) -> io::Result<Vec<u8>> {
     let length = number(input)?;
     let count = number(input)?;
-    if length > LIMIT || count > MAX_RUNS {
+    if length > limit || count > MAX_RUNS {
         return Err(invalid());
     }
     let mut restored = Vec::with_capacity(length);
@@ -279,12 +354,17 @@ fn rebuild(input: &mut &[u8], literals: &[u8], prior: &[Vec<u8>]) -> io::Result<
     Ok(restored)
 }
 
-fn restore(stage: &Path, output: &Path) -> io::Result<()> {
+fn restore_group(
+    stage: &Path,
+    limit: usize,
+    directories: impl FnOnce(&[PathBuf]) -> io::Result<()>,
+    mut emit: impl FnMut(&Path, &[u8]) -> io::Result<()>,
+) -> io::Result<()> {
     let payload = stage.join("payload");
-    let data = read_bounded(&stage.join("recipes"), LIMIT)?;
+    let data = read_bounded(&stage.join("recipes"), limit)?;
     let mut input = data.as_slice();
     let n = number(&mut input)?;
-    if n > 4096 {
+    if n > MAX_MEMBERS {
         return Err(invalid());
     }
     let (dirs, files) = inventory(&payload)?;
@@ -292,28 +372,25 @@ fn restore(stage: &Path, output: &Path) -> io::Result<()> {
         return Err(invalid());
     }
     let mut count = number(&mut input)?;
-    let mut next = if count == 0 { n } else { number(&mut input)? };
-    fs::create_dir(output)?;
-    for dir in dirs {
-        fs::create_dir_all(output.join(dir))?;
+    if count > n {
+        return Err(invalid());
     }
-    let mut total = 0;
+    let mut next = if count == 0 { n } else { number(&mut input)? };
+    directories(&dirs)?;
+    let mut remaining = limit;
     let mut prior = Vec::new();
     for (id, name) in files.iter().enumerate() {
-        let literal = read_bounded(&payload.join(name), LIMIT - total)?;
+        let literal = read_bounded(&payload.join(name), remaining)?;
         let restored = if id == next {
-            let bytes = rebuild(&mut input, &literal, &prior)?;
+            let bytes = rebuild(&mut input, &literal, &prior, remaining)?;
             count -= 1;
             next = if count == 0 { n } else { number(&mut input)? };
             bytes
         } else {
             literal
         };
-        total += restored.len();
-        if total > LIMIT {
-            return Err(invalid());
-        }
-        fs::write(output.join(name), &restored)?;
+        remaining -= restored.len();
+        emit(name, &restored)?;
         prior.push(restored);
     }
     if !input.is_empty() || count != 0 {
@@ -322,13 +399,81 @@ fn restore(stage: &Path, output: &Path) -> io::Result<()> {
     Ok(())
 }
 
+fn restore(stage: &Path, output: &Path) -> io::Result<()> {
+    restore_group(
+        stage,
+        LIMIT,
+        |dirs| {
+            fs::create_dir(output)?;
+            for dir in dirs {
+                fs::create_dir_all(output.join(dir))?;
+            }
+            Ok(())
+        },
+        |name, bytes| fs::write(output.join(name), bytes),
+    )
+}
+
+fn restore_file(stage: &Path, output: &Path, window: usize) -> io::Result<()> {
+    if !(1..=MAX_WINDOW).contains(&window) {
+        return Err(invalid());
+    }
+    let count = fs::read_dir(stage)?.try_fold(0_u64, |count, entry| {
+        if entry?.file_type()?.is_dir() {
+            count.checked_add(1).ok_or_else(invalid)
+        } else {
+            Err(invalid())
+        }
+    })?;
+    let mut output = io::BufWriter::new(fs::File::create_new(output)?);
+    for number in 0..count {
+        let group = stage.join(format!("{number:012}"));
+        if !fs::symlink_metadata(&group)?.file_type().is_dir() {
+            return Err(invalid());
+        }
+        let mut piece = 0;
+        restore_group(
+            &group,
+            window,
+            |dirs| {
+                if dirs.is_empty() {
+                    Ok(())
+                } else {
+                    Err(invalid())
+                }
+            },
+            |name, bytes| {
+                if name != Path::new(&format!("{piece:08}")) {
+                    return Err(invalid());
+                }
+                piece += 1;
+                output.write_all(bytes)
+            },
+        )?;
+    }
+    output.flush()
+}
+
 fn main() -> io::Result<()> {
     let arguments: Vec<_> = env::args_os().collect();
     let source = Path::new(arguments.get(2).ok_or_else(invalid)?);
     let target = Path::new(arguments.get(3).ok_or_else(invalid)?);
+    let size = |index| {
+        arguments
+            .get(index)
+            .and_then(|arg: &std::ffi::OsString| arg.to_str())
+            .and_then(|arg| arg.parse::<usize>().ok())
+            .ok_or_else(invalid)
+    };
     match arguments.get(1).and_then(|arg| arg.to_str()) {
         Some("prepare") => prepare(source, target),
         Some("restore") => restore(source, target),
+        Some("prepare-file") => {
+            let changed = prepare_file(source, target, size(4)?, size(5)?)?;
+            println!("{}", u8::from(changed));
+            Ok(())
+        }
+        Some("restore-file") => restore_file(source, target, size(4)?),
         _ => Err(invalid()),
     }
 }

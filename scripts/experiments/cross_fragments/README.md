@@ -7,9 +7,10 @@ The benchmark counts the wrapper and all metadata in archive size. Its wall
 and CPU measurements include fragment scanning, staging, and reconstruction.
 Each run checks the restored inventory and compares every restored file byte.
 
-Use trusted, immutable benchmark trees. The helper accepts up to 8 MiB of
-source data and 4,096 files. Its separate experimental wrapper supports
-whole-tree restoration. Bato's normal CLI, format, and indexed extraction
+Use trusted, immutable benchmark inputs. The original directory helper
+accepts up to 8 MiB of source data and 4,096 files. The standalone helper
+processes larger files in bounded windows. The experimental wrappers
+support complete restoration. Bato's normal CLI, format, and indexed extraction
 are unchanged.
 
 ```sh
@@ -144,7 +145,7 @@ python3 benchmark_files.py --branch /path/to/bato \
   --output /tmp/bato-pieces.tsv --variants stock sweep adaptive
 ```
 
-The adaptive pilot applies to original files from 128 KiB through 8 MiB.
+The initial adaptive pilot tested original files from 128 KiB through 8 MiB.
 It chooses the largest power of two at or below one quarter of the
 original size. It uses compression segments half that size, clamped to
 64–256 KiB. Inputs lacking references or whose staged literal and recipe
@@ -189,3 +190,41 @@ bytes. Their restore wall times in single runs were 15.357, 14.173,
 and 14.101 seconds. The earlier 256 KiB result used 403,316 bytes
 and restored in 4.595 seconds. The directory prototype keeps 256 KiB
 as its default.
+
+
+## Hardware-sized windows for standalone files
+
+The standalone helper now streams the original file through working windows.
+The benchmark reads effective CPU availability and available memory, including
+Linux affinity and cgroup limits where visible. The working window holds
+original bytes, literals, and a capped index. Its size is a power of two,
+bounded by one sixteenth of the fragment memory allowance and the 1 GiB
+per-window recipe limit. That is a working limit. The next window can
+continue the same file. The size plan targets 4–16 pieces per window based on
+available CPUs, bounded by the original file size. Each window has its own
+references.
+
+The benchmark accepts `--fragment-memory-budget BYTES` to lower the helper's
+allowance independently of Bato's `--memory-budget`. The file wrapper includes
+the window size for restoration. Restoring that wrapper through the benchmark
+requires an available fragment allowance at least as large as the one implied
+by its recorded window. Bato's regular archive reader and native directory
+helper retain their existing interfaces and limits.
+
+The edited 12 MiB test file contains twelve versions of a 1 MiB Silesia nci
+slice starting at byte 21,073,051. In version `i`, replace 41 bytes at
+`17091 + 19001*j + 133*i` for `j = 0..46` with original bytes 5,171 later.
+Rotate each version left by 257 bytes and concatenate in order. Every row
+below passed a complete round trip. CPU-only single runs used `fcc0683` and
+nine logical CPUs. The Bato allowance was about 7.2 GiB throughout.
+
+| Layout | Piece | Window | Archive bytes | Pack wall s | Restore wall s | Pack CPU s | Restore CPU s |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Stock | — | — | 147,958 | 120.324 | 33.355 | 604.328 | 155.616 |
+| Detected resources | 2 MiB | 16 MiB | 69,283 | 26.501 | 5.634 | 175.455 | 39.827 |
+| 64 MiB fragment allowance | 1 MiB | 4 MiB | 97,862 | 36.760 | 8.767 | 187.087 | 46.107 |
+
+The constrained run used three windows. The unedited 10,192,446-byte Silesia
+dickens file also passed direct helper restoration through three 4 MiB
+windows. It produced no eligible fragment recipes. That was a correctness
+check without a timed codec comparison.
