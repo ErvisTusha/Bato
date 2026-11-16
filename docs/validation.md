@@ -1132,3 +1132,30 @@ logical CPUs available. Per-workload median pack wall seconds were
 1.863 → 1.370, respectively. Summed pack wall time was 9.620 → 8.207 s,
 and pack CPU time was 12.874 → 13.245 s. This is a small local performance
 panel. The Python test directory took longer to pack.
+
+### Rejected shared bounds across parallel transforms
+
+The pilot let fully encoded primed and unprimed candidates publish their
+framed cost to other concurrent transforms. Equal costs kept the existing
+transform order. The focused tie test passed and all 24 round trips
+restored the inputs exactly. Every archive matched `d17ec16` byte for byte.
+
+Three alternating pairs ran on CPU for each workload. The executables
+used explicit 128 MiB segment and 64 KiB chunk geometry with up to four
+workers to exercise parallel trial admission. Bash and Python inputs
+were the first 256 KiB of the corresponding Linux executables. The
+native Rust model source directory used automatic geometry and all
+available CPUs. Seconds below are per-workload medians.
+
+| Workload | Archive bytes | Pack wall | Pack CPU | Restore wall | Restore CPU |
+|---|---:|---:|---:|---:|---:|
+| Linux ls | 48,904 | 6.554 → 4.790 | 12.946 → 12.551 | 2.731 → 3.387 | 2.691 → 3.358 |
+| Bash slice | 67,336 | 8.559 → 6.142 | 20.222 → 16.767 | 5.851 → 3.786 | 5.792 → 3.749 |
+| Python slice | 75,480 | 7.200 → 9.906 | 21.040 → 23.232 | 3.979 → 4.889 | 3.962 → 4.867 |
+| Rust models directory | 9,549 | 1.571 → 1.671 | 2.446 → 2.098 | 1.419 → 1.369 | 1.389 → 1.370 |
+| Sum of medians | 201,269 | 23.885 → 22.509 | 56.654 → 54.649 | 13.981 → 13.431 | 13.835 → 13.344 |
+
+Packing was mixed and individual timings varied substantially. The pilot
+only changed encoder scheduling, so the restore timing differences on
+identical archives illustrate variation between runs. The shared bound
+across transforms was dropped.
