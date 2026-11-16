@@ -1255,3 +1255,60 @@ listing, health, selected indexed extraction, and indexed recovery
 succeeded on the edited `ooffice` directory. The decoder restored its
 earlier format 1.23 archive and rejected a new fragment packet with a
 header falsely marked 1.23.
+
+### Rejected automatic geometry and worker changes for small directories
+
+All tests used CPU compute and a 7.2 GiB memory budget on a host with nine
+logical CPUs. Baseline compressor code was `f2daaac`. Native directories
+were passed directly to `bato archive`. Every one of the 78 round trips
+matched its original bytes and member paths.
+
+A screening pair compared one worker with automatic workers on three
+Silesia slices. Archives matched byte for byte in each pair. Pack wall
+time varied in both directions.
+
+| Slice | Offset | Input bytes | Archive bytes | Pack wall auto → one worker |
+|---|---:|---:|---:|---:|
+| xml | 3,331,688 | 512 | 151 | 1.168 → 2.273 s |
+| webster | 9,917,716 | 8,192 | 2,083 | 1.964 → 3.095 s |
+| sao | 177,923 | 24,576 | 16,733 | 4.639 → 2.344 s |
+
+A separate four-directory panel compared automatic 64 KiB geometry with
+128 and 256 KiB segments. All segment sizes used a chunk of the same
+size. The inputs were the `src` trees of spin 0.9.9, poly1305 0.8.0, and
+log 0.4.35, and five files (lib, condvar, raw_rwlock, raw_mutex, once)
+from each of parking_lot 0.11.2 and 0.12.5. Values are sums of
+per-workload medians over three runs per setting, with rotated order.
+
+| Setting | Archive bytes | Pack wall s | Pack CPU s | Restore wall s | Restore CPU s |
+|---|---:|---:|---:|---:|---:|
+| 64 KiB (auto) | 85,806 | 17.173 | 42.937 | 13.322 | 30.452 |
+| 128 KiB | 75,344 | 16.093 | 27.980 | 9.969 | 15.429 |
+| 256 KiB | 63,829 | 11.390 | 17.760 | 13.609 | 13.537 |
+
+The 128 KiB setting increased pack wall time from 2.374 to 3.435 s on
+the log directory and improved it on the other three. The 256 KiB
+setting increased restore wall time on log (2.483 to 3.188 s) and the
+parking_lot versions (4.095 to 4.234 s).
+
+The first policy pilot used 128 KiB segments for automatic catalogues
+above 128 KiB and through 256 KiB when at least two workers fit. The next
+pilot shared spare worker reservations across both segments and used an
+exclusive upper bound. Each pilot was measured in three alternating
+pairs on two fresh native trees. ArcSwap is `arc-swap` 1.9.3 `src`. The
+mixed directory used Silesia slices of x-ray (offset 871,428, 37 KiB),
+osdb (6,384,273, 44 KiB), xml (4,475,214, 34 KiB), ooffice
+(2,341,601, 30 KiB), and reymont (1,138,261, 11 KiB).
+Timings below are medians. Each comparison has its own baseline run.
+
+| Pilot | Held-out directory | Bytes auto → pilot | Pack wall s | Pack CPU s | Restore wall s | Restore CPU s |
+|---|---|---:|---:|---:|---:|---:|
+| 128 KiB with tail lending | ArcSwap | 35,751 → 34,073 | 2.582 → 3.962 | 6.705 → 8.189 | 2.551 → 2.374 | 6.616 → 3.776 |
+| 128 KiB with tail lending | Mixed data | 58,101 → 54,829 | 5.057 → 7.313 | 12.681 → 10.476 | 1.620 → 2.279 | 3.120 → 2.786 |
+| 128 KiB with both jobs sharing | ArcSwap | 35,751 → 34,073 | 3.531 → 4.392 | 9.784 → 6.317 | 2.926 → 2.372 | 7.056 → 4.339 |
+| 128 KiB with both jobs sharing | Mixed data | 58,101 → 54,829 | 4.796 → 8.054 | 11.274 → 12.118 | 1.571 → 2.432 | 2.749 → 2.685 |
+
+The two held-out directories saved 5.3% in total archive bytes. Both
+policies increased their packing wall time and the mixed directory's
+restore wall time. The directory policy and shared-reservation code
+were dropped. The three tiny files gave no size benefit from one worker.
