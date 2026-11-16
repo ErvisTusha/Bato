@@ -1,7 +1,7 @@
-# Bato format 1.22
+# Bato format 1.23
 
 A `.bato` stream holds file bytes or a serialized directory tree. Bato 0.8
-accepts format 1.22 as its underlying compression stream.
+writes format 1.23 and reads existing 1.22 streams.
 
 The stream is a 10-byte header, zero or more blocks, and a footer. Fixed-width
 integers are little-endian. Variable integers are canonical unsigned LEB128:
@@ -14,7 +14,7 @@ follows; redundant leading zero groups and values exceeding u64 are rejected.
 |---|---|---|
 | 0 | 4 | `BATO` |
 | 4 | 1 | Major `1` |
-| 5 | 1 | Minor `22` (the version of this document; other values are rejected) |
+| 5 | 1 | Minor `23` for new streams, `22` for previous streams |
 | 6 | 1 | Flags: bit 0 directory archive; other bits zero |
 | 7 | 1 | Segment log2, 16..30 (default 26) |
 | 8 | 1 | CM chunk log2, 12..20, no greater than segment log2 (default 18) |
@@ -30,8 +30,8 @@ The first byte packs type in bits 0..2 and the transform in bits 3..5 (low
 three bits) and bit 7 (fourth bit). Bit 6 is set
 on the CM chunks (types 0 and 1) of a segment whose model skipped the primer
 (below); all chunks of a segment agree, and independent types must clear it.
-The standalone end marker is the byte `255`; transform value 15 is
-undefined and rejected. Original length `n`
+The standalone end marker is the byte `255`. Transform value 15 denotes an
+independent spatial block and requires type 4. Original length `n`
 follows as a variable integer. Types 1, 3, 4, 5 and 7 then encode payload length
 `c` as a variable integer; it must be strictly smaller than `n`. The payload
 is followed by four bytes of CRC32C over the original, untransformed bytes.
@@ -44,7 +44,7 @@ allocation. Blocks cannot cross segment boundaries.
 | 1 | Coded CM chunk | `c` bytes of arithmetic code |
 | 2 | Independent stored segment | Exactly `n` bytes, no model |
 | 3 | Independent literal/copy segment | `c` bytes of commands |
-| 4 | Independent static Huffman segment | `c` bytes of table and bits |
+| 4 | Independent static Huffman or spatial segment | `c` bytes of table and bits, or a spatial packet with transform 15 |
 | 5 | Huffman-coded literal/copy segment | Token-stream length variable integer, then static table and bits |
 | 6 | Repeated-byte segment | One byte repeated `n` times, `n >= 2` |
 | 7 | Contextual digit-run segment | Literal skeleton and integer streams |
@@ -102,6 +102,20 @@ nonzero padding are rejected. The original size determines decoded length.
 For type 5 the prefixed length determines decoded token bytes, bounded by
 `n + 10`, and the token decoder must then produce exactly `n` original bytes.
 The decoder builds one lookup table; it does no adaptive training.
+
+### Independent spatial packets (type 4, transform 15)
+
+A canonical unsigned LEB128 stride in 8..1024 bytes precedes the arithmetic
+payload. The block declares the original length, which must be at least
+8192 bytes. The bit order is most significant first and missing history is
+zero. Three nested binary context tables use already decoded bits on the
+current row and up to three strides back. Each table stores counts of the
+two outcomes, halves both counts when their sum reaches 2048, and updates
+the count of the decoded bit. The three probabilities are combined with
+integer weights. The key layout and rounding in `src/core/cm/spatial.rs`
+are normative. The arithmetic stream uses the CM coder's canonical flush.
+The checksum covers the restored bytes, and no predictor state crosses a
+segment boundary.
 
 ### Coded CM payload
 

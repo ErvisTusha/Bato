@@ -968,3 +968,75 @@ thread, first-layer/expert rate (MR) and final rate (FR) as shift pairs
 default for five files; only csv gains (`30,276` to `30,171`, -0.35%) and exe
 (`116,128` to `116,099`). Best per-file total `434,167` bytes, -0.03%. The rates
 are already near the optimum, so a search costs encode time for no size.
+
+## Rejected pilots for smaller archives and lower wall time (2026-11-16)
+
+All runs used the CPU on the Xeon Platinum 8573C host. These were
+standalone reversible preprocessing and framing pilots against `c244a25`.
+They used the same Bato model and verified reconstructed bytes. The
+prototypes did not change the production format.
+
+* A fixed 127-entry word dictionary drawn from the built-in primer shortened
+  the inputs to the model, yet grew every one-worker archive tested.
+  `alice29.txt` went from 35,836 to 37,281 bytes, `lcet10.txt` from 86,233
+  to 91,006, and `plrabn12.txt` from 123,980 to 128,954.
+* CM coding the LZ command stream was faster to decode and larger.
+  The best of the interleaved and split command layouts tested on `ptt5`
+  took 48,493 bytes against 24,295 at one worker. The corresponding sizes
+  for `kennedy.xls` were 30,210 against 13,275.
+* Row XOR and sparse bit gaps inferred the 216-byte period of `ptt5` and
+  the 13-byte period of `kennedy.xls`. Neither representation beat Bato on
+  size. Coding changes in bit-run boundaries reached 28,540 bytes for
+  `ptt5` in a 0.907 s decode of the boundary stream. The eight-worker
+  baseline was 27,325 bytes.
+* Recompressing the already compressed eight-worker `kennedy.xls` archive
+  grew it from 18,359 to 18,385 bytes, with an added encode pass of 1.851 s.
+* An 8 KiB prefix was coded once as data and used as the shared primer for
+  the rest of the file. The pilot counted both complete archives, then
+  reconstructed the exact input through both decoders. At eight workers
+  the sizes were 38,878 to 38,886 (`alice29.txt`), 100,495 to 103,756
+  (`lcet10.txt`), 142,859 to 142,883 (`plrabn12.txt`), 27,325 to 28,958
+  (`ptt5`), and 18,359 to 17,973 (`kennedy.xls`). On `kennedy.xls` the
+  sizes repeated exactly over four pairs. Median pack wall time for that
+  file fell from 6.493 to 5.608 s and median decode wall time rose from
+  2.610 to 3.017 s. The initial decode improvement did not reproduce.
+
+## Independent spatial arithmetic coding (format 1.23, 2026-11-16)
+
+The comparison used `c244a25` and the integrated spatial candidate on an
+Intel Xeon Platinum 8573C with nine admitted logical CPUs. Worker geometry
+was the default for both builds. Compute backend selection was automatic
+and the host had no GPU device. All source files were verified with `cmp`
+after each measured decode. Format 1.22 streams still decode.
+
+On `ptt5`, three paired runs with alternating binary order produced the
+same sizes every time. Seconds below are medians.
+
+| Build | Bytes | Pack wall | Pack CPU | Decode wall | Decode CPU |
+|---|---:|---:|---:|---:|---:|
+| c244a25 | 27,325 | 3.152 | 21.967 | 1.551 | 7.396 |
+| Spatial | 26,175 | 3.445 | 20.766 | 0.527 | 1.653 |
+
+Canterbury's 11-file total was 380,182 to 379,032 bytes. Only `ptt5`
+changed size. The 17 independent Calgary files tied at 709,123 bytes.
+Calgary `pic` was excluded because its bytes are identical to Canterbury
+`ptt5`. The historical `paq8px -9L` result on `ptt5` was 16,907 bytes.
+The spatial result remains 9,268 bytes larger than that observation.
+
+One observed trial per build and workload was collected for the full
+corpora. Wall and CPU columns below are sums of file timings, in seconds.
+
+| Dataset | Pack wall | Pack CPU | Decode wall | Decode CPU |
+|---|---:|---:|---:|---:|
+| Canterbury | 28.794 → 26.718 | 129.991 → 122.859 | 19.085 → 17.326 | 67.147 → 60.225 |
+| Independent Calgary | 33.983 → 52.597 | 99.592 → 120.385 | 30.377 → 28.301 | 69.624 → 61.013 |
+
+The slower Calgary pack trial included a 21.45 s `progl` observation
+against 1.41 s before. Both `progl` versions produced 11,073 bytes. The
+spatial detector rejected its sampled bytes before computing any stride
+scores. The single-trial corpus timings are insufficient for a broad speed
+claim.
+
+Three additional alternating pairs on `progl` produced a median packing
+time of 1.608 s before and 1.703 s after, with the same 11,073-byte archives.
+Median decode was 1.880 s and 1.895 s. The 21.45 s observation did not recur.

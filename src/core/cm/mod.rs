@@ -24,6 +24,7 @@ mod predictor;
 pub mod profile;
 pub(crate) mod segment;
 mod simd;
+mod spatial;
 mod state;
 mod table;
 pub(crate) mod varint;

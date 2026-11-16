@@ -10,7 +10,7 @@ use super::{
     predictor::{self, pipeline, Engine, Predictor, Stages},
     profile::{Step, Timing},
     simd::Dispatch,
-    x86,
+    spatial, x86,
 };
 use crate::core::{
     checksum::crc32c,
@@ -294,6 +294,18 @@ pub(crate) fn encode_segment(
     // Keep complete framed costs throughout: a winning deflate transform is
     // not proof that the raw CM candidate (or the x86 candidate) is worse.
     let mut winner = (cost, chunks, coding);
+    if let Some(payload) = spatial::encode(raw, cost.min(raw.len() - 1))? {
+        let chunk = Chunk {
+            kind: BlockType::Huffman,
+            length: raw.len() as u32,
+            payload,
+            crc: original_crc,
+        };
+        let spatial_cost = chunks_cost(std::slice::from_ref(&chunk));
+        if spatial_cost < winner.0 {
+            winner = (spatial_cost, vec![chunk], plain(TransformId::Spatial));
+        }
+    }
     let minimum = |len: usize| -> usize {
         (0..len)
             .step_by(descriptor.chunk_bytes())
@@ -569,6 +581,22 @@ pub(crate) fn decode_segment(
     accelerator: Option<&mut WorkerFilters<'_>>,
 ) -> Result<Vec<u8>, BatoError> {
     descriptor.validate()?;
+    if coding.transform == TransformId::Spatial {
+        let [chunk] = chunks else {
+            return Err(BatoError::CorruptStream("invalid spatial segment".into()));
+        };
+        let length = chunk.length as usize;
+        if chunk.kind != BlockType::Huffman || length > max_output.min(descriptor.segment_bytes()) {
+            return Err(BatoError::CorruptStream(
+                "invalid spatial segment geometry".into(),
+            ));
+        }
+        let output = timing.time(Step::ModelDecode, || {
+            spatial::decode(&chunk.payload, length)
+        })?;
+        timing.time(Step::Checksum, || verify_chunks(chunks, &output))?;
+        return Ok(output);
+    }
     if let Some(sites) = x86::Sites::of_container(coding.transform) {
         if chunks.iter().any(|chunk| chunk.kind.independent()) {
             return Err(BatoError::CorruptStream(

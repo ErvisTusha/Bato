@@ -6,7 +6,7 @@ pub const MAGIC: [u8; 4] = *b"BATO";
 /// Format version. Any change to the container or the model that alters
 /// encoded bytes increments it; readers accept exactly this version.
 pub const VERSION_MAJOR: u8 = 1;
-pub const VERSION_MINOR: u8 = 22;
+pub const VERSION_MINOR: u8 = 23;
 /// Largest chunk the format allows (chunk log2 <= 20).
 pub const MAX_CHUNK_SIZE: usize = 1024 * 1024;
 pub const DEFAULT_SEGMENT_SIZE: usize = 64 * 1024 * 1024;
@@ -323,6 +323,8 @@ pub enum TransformId {
     DeflateX86CallsSegment = 13,
     /// As `DeflateX86Relative`, reaching targets anywhere in the container.
     DeflateX86RelativeSegment = 14,
+    /// Independent spatial arithmetic coding with a signalled byte stride.
+    Spatial = 15,
 }
 impl TransformId {
     pub fn from_u8(v: u8) -> Result<Self, BatoError> {
@@ -342,6 +344,7 @@ impl TransformId {
             12 => Ok(Self::X86RelativeSegment),
             13 => Ok(Self::DeflateX86CallsSegment),
             14 => Ok(Self::DeflateX86RelativeSegment),
+            15 => Ok(Self::Spatial),
             _ => Err(BatoError::UnknownTransformId(v)),
         }
     }

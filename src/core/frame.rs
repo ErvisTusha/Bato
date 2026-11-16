@@ -82,7 +82,7 @@ pub fn read_stream_header<R: Read>(r: &mut R) -> Result<StreamHeader, BatoError>
     if magic != MAGIC {
         return Err(BatoError::InvalidMagic(magic));
     }
-    if b[4] != VERSION_MAJOR || b[5] != VERSION_MINOR {
+    if b[4] != VERSION_MAJOR || !matches!(b[5], 22 | VERSION_MINOR) {
         return Err(BatoError::UnsupportedVersion {
             major: b[4],
             minor: b[5],
@@ -137,6 +137,11 @@ pub fn read_block_header<R: Read>(r: &mut R) -> Result<BlockHeader, BatoError> {
     }
     let block_type = BlockType::from_u8(byte[0] & 7)?;
     let transform_id = TransformId::from_u8((byte[0] >> 3) & 7 | (byte[0] >> 4) & 8)?;
+    if transform_id == TransformId::Spatial && block_type != BlockType::Huffman {
+        return Err(BatoError::CorruptStream(
+            "invalid spatial block type".into(),
+        ));
+    }
     let primer = if byte[0] & 0x40 != 0 {
         Primer::Skipped
     } else {

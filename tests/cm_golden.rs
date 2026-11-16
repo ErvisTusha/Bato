@@ -25,7 +25,10 @@ fn check(expected: &str) {
         },
         ..Default::default()
     };
-    let encoded = compress_with_options(&fixture, &options).unwrap();
+    let mut encoded = compress_with_options(&fixture, &options).unwrap();
+    assert_eq!(encoded[5], VERSION_MINOR);
+    assert_eq!(decompress(&encoded).unwrap(), fixture);
+    encoded[5] = 22;
     assert_eq!(format!("{:x}", Sha256::digest(&encoded)), expected);
     assert_eq!(decompress(&encoded).unwrap(), fixture);
 }
