@@ -128,3 +128,64 @@ times on the edited Silesia tree. The source directory had slower
 restores at every tested size, and the larger layouts on the standalone
 files also traded wall time for size. These results retain 256 KiB as
 the prototype default.
+
+## Standalone pieces from 2 KiB through 8 MiB
+
+`benchmark_files.py` trials the current branch against itself. The full
+sweep examines every power of two from 2 KiB to 8 MiB. Piece sizes at
+least as large as the input cannot split it. Those cases and splits
+with no eligible references are recorded without a redundant compression
+run. Full pipeline timings include writing and rejoining the pieces,
+the experimental wrapper, and all metadata.
+
+```sh
+python3 benchmark_files.py --branch /path/to/bato \
+  --helper /tmp/bato-fragment-pilot --input /path/to/file \
+  --output /tmp/bato-pieces.tsv --variants stock sweep adaptive
+```
+
+The adaptive pilot applies to original files from 128 KiB through 8 MiB.
+It chooses the largest power of two at or below one quarter of the
+original size. It uses compression segments half that size, clamped to
+64–256 KiB. Inputs lacking references or whose staged literal and recipe
+bytes exceed half the original use the stock path. This is a research
+wrapper for whole-file restoration.
+
+The standalone sweep, two native folder sweeps, and adaptive follow-up
+completed 58 verified round trips on nine logical CPUs. The standalone
+sweep included a 10 KiB Canterbury fields.c prefix and the original
+Canterbury spreadsheet. The other inputs were constructed.
+
+- The edited 10 KiB file is five copies of Calgary paper1 bytes
+  22,000–24,047. The edited 1 MiB file is four copies of a 256 KiB
+  Silesia x-ray slice from byte 3,612,903. In both cases copy zero
+  stays intact. In copy `i` for `i >= 1`, XOR 73 bytes starting at
+  `len/3 + 37*i` with `31*i`. Rotate the final stream left by 11 bytes.
+- The edited 4 MiB file is four copies of a 1 MiB Silesia nci slice
+  from byte 15,673,131. In copies `i = 1..3`, replace 32 bytes at
+  `8191 + 27037*j + 101*i` for `j = 0..31` with the original bytes
+  5,941 later. Rotate the final stream left by 257 bytes.
+
+The best size on the edited small file came from stock (975 bytes).
+All wrapped candidates were larger. The spreadsheet produced no
+eligible references. With a fixed 256 KiB compression segment, every
+tested piece size on the edited 1 MiB file packed more slowly than stock
+in the screening run. The adaptive follow-up used 128 KiB compression
+segments there. Results below are medians of two alternating runs per
+variant, with the `fcc0683` binary on both sides.
+
+| Input | Chosen piece | Archive bytes stock → adaptive | Pack wall s | Restore wall s | Pack CPU s | Restore CPU s |
+|---|---:|---:|---:|---:|---:|---:|
+| Edited text, 10 KiB | stock | 975 → 975 | 1.144 → 1.269 | 1.043 → 1.070 | 1.324 → 1.416 | 1.010 → 1.050 |
+| Spreadsheet, 1,006 KiB | 128 KiB, fallback | 18,359 → 18,359 | 5.402 → 5.794 | 2.595 → 2.239 | 37.271 → 38.116 | 15.120 → 14.568 |
+| Edited image, 1 MiB | 256 KiB | 500,435 → 125,217 | 11.508 → 7.555 | 4.671 → 1.829 | 82.294 → 15.818 | 28.887 → 3.538 |
+| Edited database, 4 MiB | 1 MiB | 163,856 → 45,803 | 20.166 → 7.101 | 9.258 → 2.505 | 142.282 → 26.587 | 62.114 → 8.978 |
+
+The native folder sweep used 64 KiB through 8 MiB segments, with CM
+chunks capped at 256 KiB. It used the Bato revision subset and the
+3 MiB edited Silesia tree above. The 2, 4, and 8 MiB layouts each fit
+the compacted Silesia tree into a single segment and produced 393,185
+bytes. Their restore wall times in single runs were 15.357, 14.173,
+and 14.101 seconds. The earlier 256 KiB result used 403,316 bytes
+and restored in 4.595 seconds. The directory prototype keeps 256 KiB
+as its default.
