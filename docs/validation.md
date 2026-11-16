@@ -947,3 +947,13 @@ of the same length. Archives were unchanged. On a 565 KB GeoJSON file
 at 3.70 s to 3.70 s: with at most one segment per worker the cache never hits,
 and workers prime in parallel at the start, so wall time cannot fall. Reverted.
 Primer training remains about 0.7 s CPU per segment (6% of a 681 KB encode).
+
+## Rejected: learned blend of the APM stages (2026-11-16)
+
+The eight chained, averaged APM stages were replaced by eight parallel stages
+over the ISSE output, combined with it by a learned mixer (10 inputs, weight
+sets chosen by the first stage's context, rate shift 22 to 28). Dev set of six
+400 KB files (csv, elf, exe, geojson, json, txt), one thread: baseline
+`434,301` bytes. Best blend `434,707` (+0.09%, rate 24, one weight set); the
+256-set variant `438,283` (+0.9%); rates 26 and above `496,512` to `745,484`.
+No size gain, and the extra mixer costs time. Reverted.
