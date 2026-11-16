@@ -938,3 +938,12 @@ runs on default settings, all restored and byte-verified):
   time `-30.1%`, total unpack time `-30.7%`.
 
 
+
+## Rejected: per-worker primed-model cache on decode (2026-11-16)
+
+Each decode worker kept its primed predictor and copied it for the next segment
+of the same length. Archives were unchanged. On a 565 KB GeoJSON file
+(5 segments, 8 workers) decode stayed at 1.95 s to 1.93 s and on 681 KB of text
+at 3.70 s to 3.70 s: with at most one segment per worker the cache never hits,
+and workers prime in parallel at the start, so wall time cannot fall. Reverted.
+Primer training remains about 0.7 s CPU per segment (6% of a 681 KB encode).
