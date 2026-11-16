@@ -1040,3 +1040,49 @@ claim.
 Three additional alternating pairs on `progl` produced a median packing
 time of 1.608 s before and 1.703 s after, with the same 11,073-byte archives.
 Median decode was 1.880 s and 1.895 s. The 21.45 s observation did not recur.
+
+### Fresh-input check and packed spatial windows (2026-11-16)
+
+The fresh panel used the first 512 KiB of each of the 12 Silesia files.
+It also used the original `fax2d.tif`, `g3test.tif`, and `jim___ah.tif`
+from the [LibTIFF test archive](https://download.osgeo.org/libtiff/pics-3.8.0.tar.gz)
+and the first image of each TIFF as a packed, MSB-first raster. None of
+the rasters duplicated Canterbury `ptt5`. The two 216-byte strides shared
+no nonuniform 16-row windows with `ptt5`, including its inverse. The input
+manifest SHA-256 was
+`c5c121a51dfc80d51bc7a71192c1508ad66f73c46143fb0797dee8660cf41d2b`.
+The TIFF and raster variants of a page are related inputs.
+
+At nine available CPUs, all three builds (`c244a25`, `46e74ec`, and the
+packed-window pilot) produced 1,804,271 bytes on the Silesia slices and
+142,995 bytes on the six LibTIFF inputs. Payload bytes matched across all
+builds after ignoring the version byte. Every restoration passed `cmp`.
+No file selected a spatial block. A broader eligibility rule also
+selected none and was dropped. These observations establish byte parity
+on the fresh panel. The spatial path remains inactive on that panel in
+normal CLI operation.
+
+A separate single-core codec benchmark forced the image's actual stride
+and compared identical packets. It used the existing arithmetic coder and
+the same model in both builds. Both encoders produced identical packets,
+and both decoders reproduced the raster in each of seven measured pairs.
+Times below are median milliseconds, excluding process and CLI setup.
+
+| Raster | Packet bytes | Encode before → after | Decode before → after |
+|---|---:|---:|---:|
+| fax2d | 20,531 | 78.852 → 41.124 | 81.338 → 59.783 |
+| g3test | 31,793 | 80.382 → 42.913 | 84.981 → 66.150 |
+| jim___ah | 14,643 | 21.825 → 11.487 | 23.511 → 18.478 |
+
+The packed windows preserve the format 1.23 model and output. They load
+three row windows per byte and reuse them for its eight coded bits. A
+scalar-reference test compares every model key at four strides through
+both the missing-history prefix and populated rows.
+
+The normal all-worker CLI produced the exact same 26,175-byte `ptt5`
+archive as `46e74ec` (SHA-256
+`927633ea3cc8a51288cbd35190728bb29157f954bd0a6a7d81780b0247f44b54`).
+Seven paired decodes of that same archive gave median wall times of
+0.806 s before and 0.692 s after, and median CPU times of 2.227 s before
+and 1.784 s after. Wall time varied across pairs. Each decode was compared
+with the original via `cmp`. Both spatial unit tests passed in release mode.

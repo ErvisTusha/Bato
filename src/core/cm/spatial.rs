@@ -102,22 +102,26 @@ impl Model {
     }
 }
 
-/// Bit positions are numbered from the most significant bit of each byte.
-/// Every window ends strictly before the bit being coded.
-#[inline]
-fn indices(history: &[u8], at: usize, width: usize) -> [usize; 3] {
-    let back = |n| {
-        let bit = at.wrapping_sub(n);
-        history
-            .get(bit >> 3)
-            .map_or(0, |&b| usize::from((b >> (7 - (bit & 7))) & 1))
+/// Read a row window once per byte. Reversing each byte puts earlier bit
+/// positions in the low bits, so each template is a shift and mask.
+fn row_window(history: &[u8], index: usize, distance: usize) -> usize {
+    let at = |offset: usize| {
+        (index + offset)
+            .checked_sub(distance + 1)
+            .map_or(0, |i| usize::from(history[i].reverse_bits()))
     };
-    let window = |from, to| (from..=to).fold(0, |key, bit| (key << 1) | back(bit));
-    let row = width * 8;
-    let left = window(1, 4);
-    let above = window(row - 3, row + 3);
-    let far = window(2 * row - 2, 2 * row + 2);
-    let third = window(3 * row - 1, 3 * row + 1);
+    at(0) | (at(1) << 8) | (at(2) << 16)
+}
+
+fn row_windows(history: &[u8], index: usize, width: usize) -> [usize; 3] {
+    [width, 2 * width, 3 * width].map(|distance| row_window(history, index, distance))
+}
+
+#[inline]
+fn indices([above, far, third]: [usize; 3], depth: usize, left: usize) -> [usize; 3] {
+    let above = (above >> (5 + depth)) & 127;
+    let far = (far >> (6 + depth)) & 31;
+    let third = (third >> (7 + depth)) & 7;
     let small = ((left & 7) << 6) | (((above >> 1) & 31) << 1) | ((far >> 2) & 1);
     let medium = (left << 12) | (above << 5) | far;
     [small, medium, (third << 16) | medium]
@@ -131,12 +135,15 @@ pub(super) fn encode(raw: &[u8], limit: usize) -> Result<Option<Vec<u8>>, BatoEr
     varint::push(&mut packet, width);
     let mut coder = coder::Encoder::new(limit.saturating_sub(packet.len()))?;
     let mut model = Model::new()?;
+    let mut left = 0;
     for (index, &byte) in raw.iter().enumerate() {
+        let windows = row_windows(raw, index, width);
         for depth in 0..8 {
             let bit = (byte >> (7 - depth)) & 1;
-            let key = indices(raw, index * 8 + depth, width);
+            let key = indices(windows, depth, left);
             coder.bit(bit, model.predict(key))?;
             model.observe(key, bit);
+            left = (left >> 1) | (usize::from(bit) << 3);
         }
         if coder.exceeded() {
             return Ok(None);
@@ -160,14 +167,18 @@ pub(super) fn decode(packet: &[u8], length: usize) -> Result<Vec<u8>, BatoError>
     let mut output = try_capacity(length)?;
     let mut model = Model::new()?;
     let mut coder = coder::Decoder::new(&packet[start..]);
+    let mut left = 0;
     for index in 0..length {
-        output.push(0);
+        let windows = row_windows(&output, index, width);
+        let mut byte = 0;
         for depth in 0..8 {
-            let key = indices(&output, index * 8 + depth, width);
+            let key = indices(windows, depth, left);
             let bit = coder.bit(model.predict(key))?;
             model.observe(key, bit);
-            output[index] |= bit << (7 - depth);
+            left = (left >> 1) | (usize::from(bit) << 3);
+            byte = (byte << 1) | bit;
         }
+        output.push(byte);
     }
     coder.finish()?;
     Ok(output)
@@ -176,6 +187,42 @@ pub(super) fn decode(packet: &[u8], length: usize) -> Result<Vec<u8>, BatoError>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packed_windows_match_bitwise_reference() {
+        let raw: Vec<u8> = (0..4200usize)
+            .map(|i| i.wrapping_mul(99_991).rotate_right(6) as u8 ^ (i >> 8) as u8)
+            .collect();
+        for width in [8, 37, 216, 1024] {
+            let mut left = 0;
+            for (index, &byte) in raw.iter().enumerate() {
+                let rows = row_windows(&raw[..index], index, width);
+                for depth in 0..8 {
+                    let at = index * 8 + depth;
+                    let scalar = |start, end| {
+                        (start..=end).fold(0usize, |key, offset| {
+                            let bit = at
+                                .checked_sub(offset)
+                                .map_or(0, |bit| usize::from((raw[bit / 8] >> (7 - bit % 8)) & 1));
+                            (key << 1) | bit
+                        })
+                    };
+                    let [a, b, c] = [width * 8, width * 16, width * 24];
+                    let l = scalar(1, 4);
+                    let above = scalar(a - 3, a + 3);
+                    let far = scalar(b - 2, b + 2);
+                    let third = scalar(c - 1, c + 1);
+                    let small = ((l & 7) << 6) | (((above >> 1) & 31) << 1) | ((far >> 2) & 1);
+                    let medium = (l << 12) | (above << 5) | far;
+                    assert_eq!(
+                        indices(rows, depth, left),
+                        [small, medium, (third << 16) | medium]
+                    );
+                    left = (left >> 1) | (usize::from((byte >> (7 - depth)) & 1) << 3);
+                }
+            }
+        }
+    }
 
     #[test]
     fn spatial_round_trip_and_bounded_packet() {
