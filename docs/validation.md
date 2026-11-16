@@ -1159,3 +1159,46 @@ Packing was mixed and individual timings varied substantially. The pilot
 only changed encoder scheduling, so the restore timing differences on
 identical archives illustrate variation between runs. The shared bound
 across transforms was dropped.
+
+### Rejected LZ backward extension and cached lookahead
+
+The parser pilot reused its next-position lookup on one-byte advances and
+extended each accepted match backward over equal bytes still pending as
+literals. The token format and decoder were unchanged. Four focused
+release tests passed. Each baseline and pilot LZ packet also decoded with
+the other build in the standalone parser harness.
+
+The four file slices start at offsets 1,512, 1,230, 1,832, and 2,408 KiB in
+the Silesia `reymont`, `osdb`, `x-ray`, and `mozilla` files, respectively.
+Each standalone timing is the median of nine alternating pairs of
+32 iterations, with inputs already in memory.
+
+| Input | LZ bytes before → pilot | LZ encode ms before → pilot |
+|---|---:|---:|
+| reymont, 24 KiB | 12,524 → 12,244 | 0.687 → 0.888 |
+| osdb, 96 KiB | 48,775 → 47,131 | 2.345 → 3.027 |
+| x-ray, 192 KiB | 192,012 → 191,267 | 8.730 → 7.945 |
+| mozilla, 384 KiB | 321,937 → 321,513 | 16.837 → 16.302 |
+
+The CLI ran three alternating pairs per workload against `e7ae5ba`, which
+has the same compressor code as `d17ec16`. Both used CPU compute, automatic
+worker and segment selection, and a 7.2 GiB memory budget. The native
+versioned tree contains `codec.rs`, `segment.rs`, and `frame.rs` from
+`c244a25` and `e7ae5ba`. The unrelated native tree is the `src` directory
+of codespan-reporting 0.13.1. Every one of the 36 restorations matched its
+input and every archive was byte-identical to its baseline.
+
+| Workload | Original bytes | Archive bytes | Pack wall s | Pack CPU s | Restore wall s | Restore CPU s |
+|---|---:|---:|---:|---:|---:|---:|
+| reymont slice | 24,576 | 5,329 | 1.369 → 1.323 | 1.580 → 1.614 | 0.266 → 0.267 | 0.261 → 0.234 |
+| osdb slice | 98,304 | 30,560 | 2.941 → 2.574 | 4.185 → 4.044 | 1.171 → 1.120 | 1.140 → 1.114 |
+| x-ray slice | 196,608 | 90,493 | 6.045 → 6.208 | 17.261 → 16.855 | 2.369 → 1.773 | 3.753 → 3.051 |
+| mozilla slice | 393,216 | 228,675 | 8.202 → 8.550 | 39.560 → 42.799 | 3.247 → 3.228 | 14.055 → 14.285 |
+| Versioned Bato source directory | 194,581 | 31,616 | 2.628 → 2.830 | 7.559 → 7.675 | 1.805 → 1.575 | 5.053 → 4.582 |
+| Codespan source directory | 107,574 | 13,563 | 2.026 → 1.875 | 2.900 → 2.775 | 1.923 → 1.822 | 1.905 → 1.785 |
+| Sum of medians | 1,014,859 | 400,236 | 23.212 → 23.359 | 73.046 → 75.762 | 10.781 → 9.784 | 26.166 → 25.051 |
+
+The smaller standalone LZ packets produced no smaller CLI archive on this
+panel. Summed median packing wall and CPU time increased. The decode code
+and archive bytes were identical, so restore differences between these
+runs are timing variation. The pilot was dropped.
