@@ -40,3 +40,31 @@ trees described in [validation](../../../docs/validation.md), the full
 unrelated mixed-data control. The prototype reduced archive bytes and
 packing time on the panel. The 256 KiB segments increased restore wall
 time compared with the branch.
+
+## Independent residual segments
+
+A follow-up used the four inputs that contain references from the panel above.
+All layouts used the same recipes. The stock branch and all three layouts
+ran in a rotating order with three iterations per input. All 48 round trips
+passed. Times are sums of per-input medians in seconds.
+
+| Layout | Archive bytes | Pack wall | Restore wall | Pack CPU | Restore CPU |
+|---|---:|---:|---:|---:|---:|
+| Stock branch | 141,329 | 14.341 | 6.241 | 42.984 | 18.281 |
+| 256 KiB | 92,329 | 10.380 | 6.261 | 15.597 | 6.169 |
+| 128 KiB | 96,029 | 11.215 | 5.765 | 17.498 | 7.050 |
+| 64 KiB | 99,812 | 13.407 | 5.013 | 25.404 | 10.282 |
+
+The earlier format 1.22 total for these four inputs was 96,533 bytes.
+The 128 KiB layout saved 504 bytes against that baseline. It cut pack and
+restore wall time by 21.8% and 7.6% against the contemporaneous stock branch.
+The 128 KiB layout moved `parking_lot` from 19,384 to 23,084 bytes and reduced
+its restore wall time from 2.533 to 2.232 s compared with the 256 KiB layout.
+The other three archives tied the 256 KiB sizes. The executable directory
+restored more slowly than the stock branch at 128 KiB (0.670 to 0.825 s).
+
+The unrelated control goes through the stock branch path for every layout.
+Adding its 58,101 bytes puts the 128 KiB total at 154,130 bytes, above the
+five-input format 1.22 total of 150,565 bytes. The prototype's default
+remains 256 KiB. The 128 KiB measurements apply to the fragment-bearing
+directories tested here.
