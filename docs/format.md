@@ -286,6 +286,12 @@ The stream's decoded bytes are a catalogue of entries, each starting with a kind
 | `3` | path length (u16) · path · size (u64) · id (u32) · CRC32C (u32) | file identical to the earlier file entry number `id`, stored once |
 | `0` | — | end of catalogue |
 
+Member order is selected by the encoder. Ordinary compact directory
+archives may place files with shared byte ranges next to each other so
+the segment codec can reuse their fragments. An exact-duplicate record
+always references a file already emitted in the selected order.
+Checkpoint staging retains path order.
+
 Paths are UTF-8, use `/` separators, and are relative. Absolute paths, `..`, empty components, duplicates and names that would alias on the target filesystem are rejected. Extraction writes into a staging directory, enforces entry, path, metadata and output limits, verifies every checksum, and publishes the tree only after everything is valid.
 
 ## Contextual digit-run representation (type 7)

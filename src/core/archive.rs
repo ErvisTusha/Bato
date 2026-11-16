@@ -14,6 +14,7 @@ use super::memory::{try_buffer, try_capacity, try_filled, HostBudget};
 use super::safe_fs::{
     absolute_path, open_regular_file, Directory, IfMissing, Kind, StagingDirectory,
 };
+mod grouping;
 pub mod inventory;
 pub mod managed;
 mod selection;
@@ -172,9 +173,19 @@ fn files_equal(a: &Path, b: &Path) -> io::Result<bool> {
         }
     }
 }
-fn fingerprint_file(p: &Path) -> io::Result<(u64, [u8; 32], u32)> {
-    let mut f = open_source_file(p)?;
+type FileDigest = (u64, [u8; 32], u32);
+
+fn fingerprint_file(p: &Path) -> io::Result<FileDigest> {
+    fingerprint_member(p, grouping::Order::Path).map(|(digest, _)| digest)
+}
+
+fn fingerprint_member(
+    path: &Path,
+    order: grouping::Order,
+) -> io::Result<(FileDigest, Option<[u8; 32]>)> {
+    let mut f = open_source_file(path)?;
     let size = f.metadata()?.len();
+    let mut sketch = grouping::Sketch::new(size, order);
     let mut total = 0u64;
     let mut h = Sha256::new();
     let mut crc = Crc32c::new();
@@ -184,9 +195,13 @@ fn fingerprint_file(p: &Path) -> io::Result<(u64, [u8; 32], u32)> {
         if n == 0 {
             break;
         }
-        total = total
+        let next = total
             .checked_add(n as u64)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "file too large"))?;
+        if let Some(sketch) = &mut sketch {
+            sketch.update(total, &b[..n]);
+        }
+        total = next;
         h.update(&b[..n]);
         crc.update(&b[..n]);
     }
@@ -196,7 +211,10 @@ fn fingerprint_file(p: &Path) -> io::Result<(u64, [u8; 32], u32)> {
             "file changed while archiving",
         ));
     }
-    Ok((size, h.finalize().into(), crc.finalize()))
+    Ok((
+        (size, h.finalize().into(), crc.finalize()),
+        sketch.map(grouping::Sketch::finish),
+    ))
 }
 fn open_source_file(path: &Path) -> io::Result<File> {
     open_regular_file(path)
@@ -216,7 +234,7 @@ struct ArchiveInput<'a> {
     crc_bytes: [u8; 4],
     ended: bool,
     duplicates: &'a [Option<u32>],
-    expected_files: &'a [(u64, [u8; 32], u32)],
+    expected_files: &'a [FileDigest],
     started: bool,
 }
 impl<'a> ArchiveInput<'a> {
@@ -359,13 +377,18 @@ pub fn create_solid_archive_excluding<P: AsRef<Path>, W: Write>(
     let host = HostBudget::new(o.memory_budget, &o.execution.stats)?;
     let _metadata = host.reserve(INVENTORY_METADATA + 512 * 1024)?;
     o.validate()?;
-    with_catalogue(dir.as_ref(), excluded, |input, length| {
-        let sized = CompressionOptions {
-            input_length: Some(length),
-            ..o.clone()
-        };
-        compress_archive_stream(input, w, &sized, host).map(|(_, n)| n)
-    })
+    with_catalogue(
+        dir.as_ref(),
+        excluded,
+        grouping::Order::SharedRanges,
+        |input, length| {
+            let sized = CompressionOptions {
+                input_length: Some(length),
+                ..o.clone()
+            };
+            compress_archive_stream(input, w, &sized, host).map(|(_, n)| n)
+        },
+    )
 }
 
 /// Serializes the same catalogue used by solid archives to a seekable staging file.
@@ -376,13 +399,16 @@ pub fn stage_catalogue(
 ) -> Result<(), BatoError> {
     let host = HostBudget::new(options.memory_budget, &options.execution.stats)?;
     let _metadata = host.reserve(INVENTORY_METADATA + 512 * 1024)?;
-    with_catalogue(source, &[], |input, _| Ok(io::copy(input, output)?))?;
+    with_catalogue(source, &[], grouping::Order::Path, |input, _| {
+        Ok(io::copy(input, output)?)
+    })?;
     Ok(())
 }
 
 fn with_catalogue<T>(
     dir: &Path,
     excluded: &[PathBuf],
+    order: grouping::Order,
     consume: impl FnOnce(&mut ArchiveInput<'_>, u64) -> Result<T, BatoError>,
 ) -> Result<T, BatoError> {
     // Reject links before lexical normalization, then use consistent absolute
@@ -417,12 +443,22 @@ fn with_catalogue<T>(
     } = inventory;
     ds.sort_by(|a, b| a.1.cmp(&b.1));
     fs_.sort_by(|a, b| a.1.cmp(&b.1));
-    let mut duplicates = try_filled(fs_.len(), None)?;
-    let mut expected_files = try_capacity(fs_.len())?;
-    let mut seen: HashMap<(u64, [u8; 32]), u32> = HashMap::new();
-    for (i, (path, _)) in fs_.iter().enumerate() {
+    let mut members = try_capacity(fs_.len())?;
+    for (index, path) in fs_.into_iter().enumerate() {
         root_guard.verify().map_err(err)?;
-        let fingerprint = fingerprint_file(path).map_err(err)?;
+        let fingerprint = fingerprint_member(&path.0, order).map_err(err)?;
+        members.push(grouping::Member::new(path, fingerprint, index));
+    }
+    grouping::group(&mut members)?;
+    let mut fs_: Vec<(PathBuf, String)> = try_capacity(members.len())?;
+    let mut duplicates = try_filled(members.len(), None)?;
+    let mut expected_files = try_capacity(members.len())?;
+    let mut seen: HashMap<(u64, [u8; 32]), u32> = HashMap::new();
+    for (i, member) in members.into_iter().enumerate() {
+        root_guard.verify().map_err(err)?;
+        let fingerprint = member.digest;
+        fs_.push(member.path);
+        let path = &fs_[i].0;
         expected_files.push(fingerprint);
         let key = (fingerprint.0, fingerprint.1);
         if let Some(&id) = seen.get(&key) {
@@ -941,12 +977,17 @@ mod tests {
         fs::write(dir.path().join("original"), b"shared bytes").unwrap();
         fs::write(dir.path().join("nested/duplicate"), b"shared bytes").unwrap();
         fs::write(dir.path().join("empty"), []).unwrap();
-        with_catalogue(dir.path(), &[], |reader, expected| {
-            let mut catalogue = Vec::new();
-            reader.read_to_end(&mut catalogue)?;
-            assert_eq!(expected, catalogue.len() as u64);
-            Ok(())
-        })
+        with_catalogue(
+            dir.path(),
+            &[],
+            grouping::Order::Path,
+            |reader, expected| {
+                let mut catalogue = Vec::new();
+                reader.read_to_end(&mut catalogue)?;
+                assert_eq!(expected, catalogue.len() as u64);
+                Ok(())
+            },
+        )
         .unwrap();
     }
 

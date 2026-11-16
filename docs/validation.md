@@ -1312,3 +1312,44 @@ The two held-out directories saved 5.3% in total archive bytes. Both
 policies increased their packing wall time and the mixed directory's
 restore wall time. The directory policy and shared-reservation code
 were dropped. The three tiny files gave no size benefit from one worker.
+
+### Pairing files with shared byte ranges in compact native archives
+
+The grouping pilot checks two 2 KiB windows, inset 1 KiB from each end,
+during the archive's existing SHA-256 and CRC32C fingerprint pass. For
+eligible 8–30 KiB files it can move a distinct member next to an earlier
+member with the same window digest. The policy applies to ordinary
+directory inputs totaling 128–256 KiB before duplicate elimination. Pairs
+use existing segment boundaries and catalogue records. Exact-duplicate
+IDs are assigned in the emitted order. This only changes file order and
+keeps format 1.24.
+
+The baseline was `7897610`. Both builds used CPU compute, automatic
+threads, and a 7.2 GiB budget on nine logical CPUs. Each workload ran
+three alternating pairs through native `archive` and `extract`. All 30
+round trips reproduced every path and file byte. Seconds are medians.
+
+| Directory | Archive bytes before → after | Pack wall | Pack CPU | Restore wall | Restore CPU |
+|---|---:|---:|---:|---:|---:|
+| Edited executable variants | 70,084 → 47,876 | 4.941 → 4.436 | 13.318 → 11.656 | 0.772 → 0.617 | 1.843 → 1.356 |
+| Edited mixed variants | 42,929 → 25,113 | 6.569 → 4.032 | 15.289 → 10.818 | 1.823 → 0.567 | 3.352 → 1.552 |
+| Real Bato source revisions | 28,123 → 26,273 | 2.172 → 2.282 | 5.527 → 5.707 | 1.871 → 1.571 | 4.939 → 4.090 |
+| parking_lot source versions | 26,681 → 26,681 | 2.172 → 2.279 | 7.259 → 7.281 | 2.173 → 2.072 | 6.665 → 6.452 |
+| Unrelated mixed data | 58,101 → 58,101 | 5.191 → 5.487 | 11.942 → 13.409 | 1.575 → 1.723 | 2.481 → 2.546 |
+| Sum of medians | 225,918 → 184,044 | 21.045 → 18.517 | 53.336 → 48.872 | 8.214 → 6.549 | 19.280 → 15.996 |
+
+The edited trees each have four 22 KiB slices and a revised version of
+each slice. The executable sources and byte offsets are Linux Python
+(`0x32313`), Bash (`0x353ab`), Silesia ooffice (2,692,003), and Linux ls
+(28,611). The mixed sources are Silesia nci (4,911,102), xml (4,298,731),
+mr (710,435), and x-ray (4,106,754). To make each revision, replace 97
+bytes at offset `8701 + 113 * file_index` with bytes 390 through 758
+from its original slice. The original and edited copies live under
+separate subdirectories. The Bato tree contains `archive.rs`,
+`codec.rs`, `jobs.rs`, `types.rs`, and `profile.rs` from `a6ac9b6` and
+`f2daaac`. The two controls are the trees from the small-directory
+scheduler experiment above. They produced byte-identical archives.
+
+The real Bato revisions and both controls had higher pack wall times.
+The unrelated mixed tree also had higher restore wall time. The
+constructed revision cases accounted for most of the savings.
