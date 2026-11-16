@@ -12,8 +12,9 @@ pub const MAX_CHUNK_SIZE: usize = 1024 * 1024;
 pub const DEFAULT_SEGMENT_SIZE: usize = 64 * 1024 * 1024;
 pub const DEFAULT_CHUNK_SIZE: usize = 256 * 1024;
 /// Smallest automatic segment, in bytes. Below two of these an input stays one
-/// stream: on 508 KB of text, 2 streams cost +4.1% and 4 cost +8.0%.
-pub const MIN_AUTO_SEGMENT: usize = 1024 * 1024;
+/// stream. Small segments cost size: on 508 KB of text, 2 streams cost +4.1%
+/// and 4 cost +8.0%; the owner accepts that so all cores are used.
+pub const MIN_AUTO_SEGMENT: usize = 64 * 1024;
 pub const DEFAULT_TABLE_LOG2: u8 = 22;
 /// Largest number of worker threads a caller may request.
 pub const MAX_THREADS: usize = 256;
@@ -436,8 +437,11 @@ impl Geometry {
         }
         let share = length.div_ceil(workers.max(1) as u64);
         let segment = usize::try_from(share.next_power_of_two()).unwrap_or(DEFAULT_SEGMENT_SIZE);
+        let segment_size = segment.clamp(MIN_AUTO_SEGMENT, DEFAULT_SEGMENT_SIZE);
         Geometry {
-            segment_size: segment.clamp(MIN_AUTO_SEGMENT, DEFAULT_SEGMENT_SIZE),
+            segment_size,
+            // A chunk never exceeds its segment.
+            chunk_size: self.chunk_size.min(segment_size),
             ..self
         }
     }
