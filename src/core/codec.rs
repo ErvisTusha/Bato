@@ -1,8 +1,9 @@
 //! Memory admission and an ordered worker pool for independent segments.
 use super::cm::{
     descriptor::Descriptor,
+    primer_cache::PrimerCache,
     profile::Step,
-    segment::{self, Chunk, Coding, Direction, Trials},
+    segment::{self, Chunk, Coding, Direction, ModelContext, Trials},
 };
 use super::memory::{HostBudget, MemoryLease};
 use super::{
@@ -70,6 +71,25 @@ pub(crate) enum Work {
     },
 }
 
+impl Work {
+    fn short_segment(&self) -> bool {
+        match self {
+            Self::Encode {
+                raw, descriptor, ..
+            } => raw.len() < descriptor.segment_bytes(),
+            Self::Decode {
+                chunks, descriptor, ..
+            } => {
+                chunks
+                    .iter()
+                    .map(|chunk| chunk.length as usize)
+                    .sum::<usize>()
+                    < descriptor.segment_bytes()
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct EncodedChunk {
     pub header: BlockHeader,
@@ -115,20 +135,25 @@ fn execute(
     work: Work,
     stats: &ExecutionStats,
     accelerator: &mut WorkerFilters<'_>,
+    context: ModelContext<'_>,
 ) -> Result<Output, BatoError> {
+    let timing = context.timing;
     match work {
         Work::Encode {
             mut raw,
             descriptor,
             trials,
         } => {
-            let timing = stats.timing();
             let original = Original {
                 length: raw.len() as u64,
                 crc: timing.time(Step::Checksum, || crc32c(&raw)),
             };
-            let (chunks, coding) =
-                segment::encode_segment(&mut raw, (descriptor, trials), timing, Some(accelerator))?;
+            let (chunks, coding) = segment::encode_segment(
+                &mut raw,
+                (descriptor, trials),
+                context,
+                Some(accelerator),
+            )?;
             stats.update(|s| s.cpu_blocks += chunks.len() as u64);
             Ok(Output::Encoded(
                 chunks
@@ -143,7 +168,6 @@ fn execute(
             descriptor,
             coding,
         } => {
-            let timing = stats.timing();
             let max_output = descriptor.segment_bytes();
             let verified_crc = match chunks.as_mut_slice() {
                 [chunk] if coding.transform == TransformId::None => {
@@ -174,7 +198,7 @@ fn execute(
                 &chunks,
                 (descriptor, max_output),
                 coding,
-                timing,
+                context,
                 Some(accelerator),
             )?;
             stats.update(|s| s.cpu_blocks += chunks.len() as u64);
@@ -210,6 +234,7 @@ pub(crate) struct Pool {
     host: Arc<HostBudget>,
     job_memory: usize,
     parallel_trials_memory: Option<usize>,
+    primers: Option<Arc<PrimerCache>>,
     _infrastructure: MemoryLease,
 }
 
@@ -220,6 +245,12 @@ impl Pool {
         options: &ExecutionOptions,
     ) -> Result<Self, BatoError> {
         let admission = admit((descriptor, direction), host.available(), options)?;
+        let primers = PrimerCache::open(
+            descriptor,
+            &host,
+            (admission.workers, admission.host_memory),
+        )
+        .map(Arc::new);
         options.stats.update(|s| {
             s.cpu_workers = admission.workers;
             s.estimated_host_memory = host.used().saturating_add(admission.host_memory);
@@ -246,6 +277,7 @@ impl Pool {
             job_memory: segment::memory_required(descriptor, direction)?,
             parallel_trials_memory: (direction == Direction::Encode)
                 .then(|| segment::parallel_trials_memory(descriptor)),
+            primers,
             _infrastructure: infrastructure,
         };
         if direction == Direction::Encode {
@@ -269,12 +301,18 @@ impl Pool {
             let finished = finished.clone();
             let options = options.clone();
             let accelerators = accelerators.clone();
+            let primers = self.primers.clone();
             self.handles
                 .push(
                     std::thread::Builder::new()
                         .stack_size(STACK_MEMORY)
                         .spawn(move || {
-                            run_worker(&incoming, &finished, &options, (&accelerators, worker))
+                            run_worker(
+                                &incoming,
+                                &finished,
+                                &options,
+                                (&accelerators, worker, primers.as_deref()),
+                            )
                         })?,
                 );
         }
@@ -347,7 +385,7 @@ impl Pool {
                     let options = &startup.options;
                     let mut accelerator =
                         WorkerFilters::new(&accelerators, (options.compute, &options.stats), 0);
-                    let result = run_job(job, lease, options, &mut accelerator);
+                    let result = run_job(job, lease, options, (&mut accelerator, None));
                     self.ready.insert(self.submitted, result);
                     self.submitted += 1;
                     self.inline_bytes = total;
@@ -388,7 +426,7 @@ fn run_worker(
     incoming: &Mutex<mpsc::Receiver<Job>>,
     finished: &mpsc::Sender<JobResult>,
     options: &ExecutionOptions,
-    (accelerators, worker): (&FilterPool, usize),
+    (accelerators, worker, primers): (&FilterPool, usize, Option<&PrimerCache>),
 ) {
     let mut accelerator =
         WorkerFilters::new(accelerators, (options.compute, &options.stats), worker);
@@ -396,7 +434,10 @@ fn run_worker(
         let Ok((id, work, lease)) = incoming.lock().unwrap().recv() else {
             return;
         };
-        let result = run_job(work, lease, options, &mut accelerator);
+        // A short first segment ends the stream. Training directly is
+        // cheaper than allocating a template and immediately copying it.
+        let primers = primers.filter(|_| id != 0 || !work.short_segment());
+        let result = run_job(work, lease, options, (&mut accelerator, primers));
         if finished.send((id, result)).is_err() {
             return;
         }
@@ -407,10 +448,18 @@ fn run_job(
     work: Work,
     lease: MemoryLease,
     options: &ExecutionOptions,
-    accelerator: &mut WorkerFilters<'_>,
+    (accelerator, primers): (&mut WorkerFilters<'_>, Option<&PrimerCache>),
 ) -> Result<Completed, BatoError> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        execute(work, &options.stats, accelerator)
+        execute(
+            work,
+            &options.stats,
+            accelerator,
+            ModelContext {
+                timing: options.stats.timing(),
+                primers,
+            },
+        )
     }))
     .unwrap_or_else(|_| Err(BatoError::CorruptStream("worker panicked".into())))
     .map(|output| Completed {

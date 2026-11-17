@@ -22,6 +22,7 @@ mod mixer;
 mod models;
 mod numbers;
 mod predictor;
+pub(crate) mod primer_cache;
 pub mod profile;
 mod raw_noise;
 pub(crate) mod segment;

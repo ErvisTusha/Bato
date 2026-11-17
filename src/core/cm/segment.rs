@@ -10,6 +10,7 @@ use super::{
     descriptor::Descriptor,
     fast, filters, fragments, lz,
     predictor::{self, pipeline, Engine, Predictor, Stages},
+    primer_cache::PrimerCache,
     profile::{Step, Timing},
     raw_noise,
     simd::Dispatch,
@@ -35,9 +36,31 @@ fn primer_bytes(primer: Primer) -> &'static [u8] {
 }
 
 /// Trains a fresh model on the segment's primer, exactly as coding would.
-fn prime(model: &mut Predictor, primer: &[u8]) {
+pub(super) fn prime(model: &mut Predictor, primer: &[u8]) {
     for (at, &byte) in primer.iter().enumerate() {
         model.observe_byte(byte, &primer[..at]);
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ModelContext<'a> {
+    pub(crate) timing: Timing<'a>,
+    pub(crate) primers: Option<&'a PrimerCache>,
+}
+
+impl<'a> From<Timing<'a>> for ModelContext<'a> {
+    fn from(timing: Timing<'a>) -> Self {
+        Self {
+            timing,
+            primers: None,
+        }
+    }
+}
+
+impl<'a> ModelContext<'a> {
+    fn cache(self, length: usize, table_log2: u8) -> Option<&'a PrimerCache> {
+        self.primers
+            .filter(|cache| cache.supports(length, table_log2))
     }
 }
 
@@ -63,6 +86,7 @@ struct Run<'a> {
     /// transformed bytes `DEFLATE_EXPANSION` times that.
     max_bytes: usize,
     timing: Timing<'a>,
+    primers: Option<&'a PrimerCache>,
     stages: Stages,
 }
 
@@ -253,12 +277,14 @@ fn concurrent_models_fit(
 /// Encodes one segment, first applying the reversible x86 address transform
 /// in place when its byte statistics favor it. `raw` is restored before
 /// returning, and chunk CRCs always cover the original bytes.
-pub(crate) fn encode_segment(
+pub(crate) fn encode_segment<'a>(
     raw: &mut [u8],
     (descriptor, trials): (Descriptor, Trials),
-    timing: Timing<'_>,
+    context: impl Into<ModelContext<'a>>,
     mut accelerator: Option<&mut WorkerFilters<'_>>,
 ) -> Result<(Vec<Chunk>, Coding), BatoError> {
+    let context = context.into();
+    let timing = context.timing;
     descriptor.validate()?;
     if raw.len() > descriptor.segment_bytes() {
         return Err(BatoError::InvalidOptions("segment exceeds geometry".into()));
@@ -311,7 +337,7 @@ pub(crate) fn encode_segment(
                     (&tape, sites.transform()),
                     (descriptor, trials),
                     winner.0,
-                    timing,
+                    context,
                 )
             })
             .transpose()?
@@ -380,7 +406,7 @@ pub(crate) fn encode_segment(
                     descriptor.segment_bytes() * DEFLATE_EXPANSION,
                 ),
                 winner.0,
-                (timing, &mut Snapshot::new(false)),
+                (context, &mut Snapshot::new(false)),
             )? {
                 winner = (
                     cost,
@@ -397,7 +423,7 @@ pub(crate) fn encode_segment(
         return Ok((winner.1, winner.2));
     }
     if let Some(chunk) =
-        encode_cold_tail(raw, (descriptor, trials), (winner.0, original_crc), timing)?
+        encode_cold_tail(raw, (descriptor, trials), (winner.0, original_crc), context)?
     {
         return Ok((vec![chunk], plain(TransformId::None)));
     }
@@ -414,6 +440,9 @@ pub(crate) fn encode_segment(
         .chain([TransformId::None])
         .collect();
     let reservations = trials.reservations();
+    let can_share_primer = context
+        .cache(PRIMER.len() + raw.len(), descriptor.table_log2)
+        .is_some();
     if trials.is_parallel()
         && transforms.len() > 1
         && min_frame < winner.0
@@ -424,7 +453,8 @@ pub(crate) fn encode_segment(
             .map(|&transform| filters::forward_on(raw, transform, &mut accelerator))
             .collect::<Result<Vec<_>, _>>()?;
         let limit = winner.0;
-        let shared = (raw.len() <= SNAPSHOT_BYTES
+        let shared = (!can_share_primer
+            && raw.len() <= SNAPSHOT_BYTES
             && concurrent_models_fit(
                 descriptor,
                 raw.len(),
@@ -450,7 +480,7 @@ pub(crate) fn encode_segment(
                             input,
                             (descriptor, each, descriptor.segment_bytes()),
                             limit,
-                            (timing, &mut snapshot),
+                            (context, &mut snapshot),
                         )
                     })
                 })
@@ -473,7 +503,8 @@ pub(crate) fn encode_segment(
     }
     // Two or more primed candidates of this length follow: train once.
     let mut snapshot = Snapshot::new(
-        raw.len() <= SNAPSHOT_BYTES
+        !can_share_primer
+            && raw.len() <= SNAPSHOT_BYTES
             && concurrent_models_fit(descriptor, raw.len(), (2, reservations))
             && (x86.is_some() || filters::CANDIDATES.contains(&selected_filter)),
     );
@@ -484,7 +515,7 @@ pub(crate) fn encode_segment(
                 raw,
                 (descriptor, trials, descriptor.segment_bytes()),
                 winner.0,
-                (timing, &mut snapshot),
+                (context, &mut snapshot),
             );
             // Even when coding errors, leave the caller's input intact.
             x86::inverse(raw, sites);
@@ -514,7 +545,7 @@ pub(crate) fn encode_segment(
             &transformed,
             (descriptor, trials, descriptor.segment_bytes()),
             winner.0,
-            (timing, &mut snapshot),
+            (context, &mut snapshot),
         )? {
             for (chunk, bytes) in chunks.iter_mut().zip(raw.chunks(descriptor.chunk_bytes())) {
                 chunk.crc = crc32c(bytes);
@@ -534,7 +565,7 @@ pub(crate) fn encode_segment(
             raw,
             (descriptor, trials, descriptor.segment_bytes()),
             winner.0,
-            (timing, &mut snapshot),
+            (context, &mut snapshot),
         )? {
             winner = (
                 cost,
@@ -554,12 +585,13 @@ pub(crate) fn encode_segment(
 /// tie the primed run wins. The runs are independent, so they execute on two
 /// threads: a run needs no result of the other, and a run that costs `limit`
 /// or more is discarded either way, so the output does not depend on timing.
-fn model_candidate(
+fn model_candidate<'a>(
     input: &[u8],
     (descriptor, trials, max_bytes): (Descriptor, Trials, usize),
     limit: usize,
-    (timing, snapshot): (Timing<'_>, &mut Snapshot),
+    (context, snapshot): (impl Into<ModelContext<'a>>, &mut Snapshot),
 ) -> Result<Option<(usize, Primer, Vec<Chunk>)>, BatoError> {
+    let context = context.into();
     // Primed and unprimed trials run side by side when both are tried.
     let models = if input.len() > UNPRIMED_TRIAL_BYTES {
         1
@@ -577,7 +609,8 @@ fn model_candidate(
             budget: Some(cap),
             incumbent,
             max_bytes,
-            timing,
+            timing: context.timing,
+            primers: context.primers,
             stages,
         };
         let chunks = encode_model(input, descriptor, run, snapshot)?;
@@ -631,12 +664,13 @@ fn chunks_cost(chunks: &[Chunk]) -> usize {
 }
 
 /// A zero token-length field distinguishes this packet from static Huffman.
-fn encode_fragment_packet(
+fn encode_fragment_packet<'a>(
     (tape, transform): (&[u8], TransformId),
     (descriptor, trials): (Descriptor, Trials),
     limit: usize,
-    timing: Timing<'_>,
+    context: impl Into<ModelContext<'a>>,
 ) -> Result<Option<Vec<u8>>, BatoError> {
+    let context = context.into();
     let transformed;
     let input = if transform == TransformId::None {
         tape
@@ -648,7 +682,7 @@ fn encode_fragment_packet(
         input,
         (descriptor, trials, descriptor.segment_bytes()),
         limit,
-        (timing, &mut Snapshot::new(false)),
+        (context, &mut Snapshot::new(false)),
     )?
     else {
         return Ok(None);
@@ -670,12 +704,13 @@ fn encode_fragment_packet(
     Ok(Some(packet))
 }
 
-fn encode_cold_tail(
+fn encode_cold_tail<'a>(
     raw: &[u8],
     (descriptor, trials): (Descriptor, Trials),
     (limit, crc): (usize, u32),
-    timing: Timing<'_>,
+    context: impl Into<ModelContext<'a>>,
 ) -> Result<Option<Chunk>, BatoError> {
+    let context = context.into();
     let Some(prefix) = raw_noise::cold_prefix(raw, descriptor.chunk_bytes()) else {
         return Ok(None);
     };
@@ -687,7 +722,7 @@ fn encode_cold_tail(
         &raw[prefix..],
         (descriptor, trials, descriptor.chunk_bytes()),
         budget,
-        (timing, &mut Snapshot::new(false)),
+        (context, &mut Snapshot::new(false)),
     )?
     else {
         return Ok(None);
@@ -716,12 +751,13 @@ fn encode_cold_tail(
     }))
 }
 
-fn decode_cold_tail(
+fn decode_cold_tail<'a>(
     packet: &[u8],
     descriptor: Descriptor,
     length: usize,
-    timing: Timing<'_>,
+    context: impl Into<ModelContext<'a>>,
 ) -> Result<Vec<u8>, BatoError> {
+    let context = context.into();
     let invalid = || BatoError::CorruptStream("invalid stored-prefix packet".into());
     let primer = match packet.first() {
         Some(0) => Primer::Read,
@@ -747,19 +783,20 @@ fn decode_cold_tail(
         payload: try_copy(coded)?,
         crc: 0,
     };
-    let decoded = decode_chunks(&[block], descriptor, tail, (primer, timing))?;
+    let decoded = decode_chunks(&[block], descriptor, tail, (primer, context))?;
     let mut output = try_capacity(length)?;
     output.extend_from_slice(stored);
     output.extend_from_slice(&decoded);
     Ok(output)
 }
 
-fn decode_fragment_packet(
+fn decode_fragment_packet<'a>(
     packet: &[u8],
     descriptor: Descriptor,
     length: usize,
-    timing: Timing<'_>,
+    context: impl Into<ModelContext<'a>>,
 ) -> Result<Vec<u8>, BatoError> {
+    let context = context.into();
     let invalid = || BatoError::CorruptStream("invalid context-mixed fragments".into());
     let mut at = 0;
     let token_length = varint::take(packet, &mut at)?;
@@ -802,8 +839,8 @@ fn decode_fragment_packet(
     if at != packet.len() {
         return Err(invalid());
     }
-    let mut tape = decode_chunks(&chunks, descriptor, token_length, (primer, timing))?;
-    timing.time(Step::InverseTransform, || {
+    let mut tape = decode_chunks(&chunks, descriptor, token_length, (primer, context))?;
+    context.timing.time(Step::InverseTransform, || {
         filters::inverse(&mut tape, transform)?;
         lz::decode(&tape, length)
     })
@@ -811,13 +848,15 @@ fn decode_fragment_packet(
 
 /// Decodes one segment and reverses its declared transform. Chunk CRCs are
 /// verified on the original bytes.
-pub(crate) fn decode_segment(
+pub(crate) fn decode_segment<'a>(
     chunks: &[Chunk],
     (descriptor, max_output): (Descriptor, usize),
     coding: Coding,
-    timing: Timing<'_>,
+    context: impl Into<ModelContext<'a>>,
     accelerator: Option<&mut WorkerFilters<'_>>,
 ) -> Result<Vec<u8>, BatoError> {
+    let context = context.into();
+    let timing = context.timing;
     descriptor.validate()?;
     if coding.transform == TransformId::Spatial {
         let [chunk] = chunks else {
@@ -845,7 +884,7 @@ pub(crate) fn decode_segment(
             chunks,
             descriptor,
             max_output.saturating_mul(DEFLATE_EXPANSION),
-            (coding.primer, timing),
+            (coding.primer, context),
         )?;
         timing.time(Step::Checksum, || verify_chunks(chunks, &transformed))?;
         return timing.time(Step::InverseTransform, || {
@@ -871,16 +910,16 @@ pub(crate) fn decode_segment(
                 ));
             }
             let output = if let Some(tail) = chunk.payload.strip_prefix(&[0, 0]) {
-                decode_cold_tail(tail, descriptor, n, timing)?
+                decode_cold_tail(tail, descriptor, n, context)?
             } else {
-                decode_fragment_packet(&chunk.payload[1..], descriptor, n, timing)?
+                decode_fragment_packet(&chunk.payload[1..], descriptor, n, context)?
             };
             timing.time(Step::Checksum, || verify_chunks(chunks, &output))?;
             return Ok(output);
         }
         fast::decode(chunk.kind, &chunk.payload, n)?
     } else {
-        decode_chunks(chunks, descriptor, max_output, (coding.primer, timing))?
+        decode_chunks(chunks, descriptor, max_output, (coding.primer, context))?
     };
     timing.time(Step::InverseTransform, || {
         filters::inverse_on(&mut output, coding.transform, accelerator)
@@ -923,6 +962,7 @@ fn encode_with_dispatch(
         incumbent: None,
         max_bytes: descriptor.segment_bytes(),
         timing: Timing::off(),
+        primers: None,
         stages: Stages::Serial,
     };
     encode_model(raw, descriptor, run, None)?
@@ -945,12 +985,20 @@ fn encode_model(
         return Ok(Some(Vec::new()));
     }
     let total = primer.len() + raw.len();
+    let cached = run
+        .primers
+        .filter(|cache| {
+            run.primer == Primer::Read
+                && run.dispatch == Dispatch::Native
+                && cache.supports(total, descriptor.table_log2)
+        })
+        .and_then(|cache| cache.model(run.timing));
     let kept = snapshot
         .as_ref()
         .and_then(|snapshot| snapshot.model.as_ref())
         .filter(|arc| arc.0 == total)
         .map(|arc| arc.1.clone());
-    let mut model = match kept {
+    let mut model = match cached.or(kept) {
         Some(model) => model,
         None => {
             let mut model = Predictor::new(total, descriptor.table_log2, run.dispatch)?;
@@ -1068,12 +1116,14 @@ fn encode_chunks(
 
 /// Validates geometry and limits; replays only history needed by coded chunks.
 /// The result is still transformed when the segment declares a transform.
-fn decode_chunks(
+fn decode_chunks<'a>(
     chunks: &[Chunk],
     descriptor: Descriptor,
     max_output: usize,
-    (primer, timing): (Primer, Timing<'_>),
+    (primer, context): (Primer, impl Into<ModelContext<'a>>),
 ) -> Result<Vec<u8>, BatoError> {
+    let context = context.into();
+    let timing = context.timing;
     let primer = primer_bytes(primer);
     descriptor.validate()?;
     let mut total = 0usize;
@@ -1114,12 +1164,19 @@ fn decode_chunks(
         return Ok(output);
     };
     let mut output = try_capacity(primer.len() + total)?;
-    let mut model = Predictor::new(
-        primer.len() + total,
-        descriptor.table_log2,
-        Dispatch::Native,
-    )?;
-    timing.time(Step::PrimerTraining, || prime(&mut model, primer));
+    let length = primer.len() + total;
+    let cached = (!primer.is_empty())
+        .then(|| context.cache(length, descriptor.table_log2))
+        .flatten()
+        .and_then(|cache| cache.model(timing));
+    let mut model = match cached {
+        Some(model) => model,
+        None => {
+            let mut model = Predictor::new(length, descriptor.table_log2, Dispatch::Native)?;
+            timing.time(Step::PrimerTraining, || prime(&mut model, primer));
+            model
+        }
+    };
     if timing.enabled() {
         model.start_meter();
     }
@@ -1254,6 +1311,7 @@ mod tests {
             incumbent: None,
             max_bytes: descriptor.segment_bytes(),
             timing: Timing::off(),
+            primers: None,
             stages: Stages::Serial,
         };
         for byte in 0..=255u8 {
@@ -1306,6 +1364,7 @@ mod tests {
                 incumbent: None,
                 max_bytes: descriptor.segment_bytes(),
                 timing: Timing::off(),
+                primers: None,
                 stages: Stages::Serial,
             };
             encode_model(&raw, descriptor, run, None).unwrap().unwrap()

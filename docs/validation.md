@@ -1395,3 +1395,52 @@ more decode wall time and 4.3% more encode CPU time. `gofmt` cost 6.2%
 more decode wall time and 24.4% more decode CPU time. Millisecond results
 are sensitive to process and filesystem overhead. This sample covers
 selected files and directories from the named inputs.
+
+### Shared primer templates and cross-file source retention
+
+With stock `bc88f8b`, primer training accounted for 51% of instrumented
+encode and decode worker time on the host's `liblzma` ELF and 42% on a
+KiCad template tree. Each stream can now reserve one trained model for
+the power-of-two length class of its full segments, up to 256 KiB. Workers
+reuse it only when their predictor table dimensions match. The small
+first-segment path trains directly. A stream needs extra memory headroom
+to reserve the template. Native catalogue matching keeps up to two anchor
+positions from the most recent file and one from each of two earlier
+files. It selects the longest exact run after allowing backward extension
+and uses the actual serialized recipe cost for the existing coverage gate.
+Both changes use format 1.25.
+
+The benchmark used CPU-only release builds with thin LTO, automatic
+geometry, nine logical CPUs and a 7.2 GiB memory budget. Each pair used
+the same input and alternated build order. File restores passed `cmp`.
+Directory restores used native `archive` and `extract`; paths, sizes, and
+SHA-256 hashes matched. These eight workloads used three pairs each.
+The table shows medians in seconds and their sums. CPU time sums user and
+system time across threads.
+
+| Workload | Archive bytes, stock → candidate | Encode wall | Encode CPU | Decode wall | Decode CPU |
+|---|---:|---:|---:|---:|---:|
+| Python 3.13 `json` and `tomllib` sources | 12,727 → 12,727 | 1.9735 → 1.8216 | 2.6231 → 2.5191 | 1.8714 → 1.8458 | 1.8475 → 1.8122 |
+| Two `memchr` releases, changed source files | 4,415 → 4,415 | 1.5691 → 1.3187 | 1.9828 → 1.5666 | 1.3689 → 1.2689 | 1.3276 → 1.2408 |
+| Three `memchr` releases, changed source files | 31,582 → 31,553 | 3.0024 → 3.0369 | 10.0732 → 8.1023 | 2.2555 → 2.2288 | 7.1362 → 5.2250 |
+| `liblzma.so.5.8.1` | 80,269 → 80,269 | 7.2747 → 4.8691 | 21.8702 → 12.3690 | 2.5267 → 2.2729 | 5.7495 → 4.1819 |
+| KiCad `STM32_Nucleo-64_Morpho` template | 182,229 → 182,229 | 7.9984 → 5.6629 | 37.7323 → 21.6616 | 1.9731 → 2.1294 | 7.3708 → 6.0541 |
+| GDAL `nitf_spec.xml` | 11,263 → 11,263 | 3.4913 → 3.5422 | 8.6108 → 6.9457 | 1.7911 → 1.7776 | 4.0885 → 2.9089 |
+| Inkscape `start-welcome.png` | 173,825 → 173,825 | 3.0793 → 4.7264 | 8.1872 → 8.8347 | 0.0080 → 0.0081 | 0.0062 → 0.0041 |
+| XKB `rules/evdev.xml` | 12,323 → 12,323 | 3.8264 → 3.3093 | 12.5831 → 8.0653 | 2.0212 → 2.1298 | 3.9682 → 4.2364 |
+| Sum | 508,633 → 508,604 | 32.2151 → 28.2871 | 103.6627 → 70.0642 | 13.8158 → 13.6613 | 31.4944 → 25.6635 |
+
+The two-release tree used crates.io `memchr` 2.7.5 and 2.7.6. The
+three-release tree also included 2.8.3. Each tree preserved the original
+bytes and paths of the Rust source files that existed in every included
+release and differed in at least one release. On the three-release tree
+the primer-only screen kept the 31,582-byte archive. The matching change
+saved 29 bytes. The other seven archives were identical by SHA-256.
+
+The three-release tree and GDAL encoded 1.1% and 1.5% slower by median
+wall time. Inkscape encoded 53.5% slower and consumed 7.9% more encode CPU
+time in the final pairs. Its initial prototype pairs moved in the other
+direction. The KiCad and XKB inputs decoded 7.9% and 5.4% slower by wall
+time. XKB also used 6.8% more decode CPU time. The Inkscape decode timings
+differed by 0.1 ms. The size saving is limited to the revision tree, and
+the summed decode wall-time difference is small.
