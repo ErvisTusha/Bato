@@ -261,8 +261,9 @@ fn extraction_preserves_outer_checksum_and_output_limit_errors() {
     catalogue.push(0);
     let mut encoded = wrap(&catalogue);
     let mut header = Cursor::new(&encoded);
-    header.set_position(10);
-    let block = read_block_header(&mut header).unwrap();
+    let stream = read_stream_header(&mut header).unwrap();
+    let geometry = read_geometry(&mut header).unwrap();
+    let block = read_stream_block_header(&mut header, &stream, geometry).unwrap();
     let crc_at = header.position() as usize + block.compressed_size as usize;
     encoded[crc_at] ^= 1;
     assert!(matches!(

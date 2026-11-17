@@ -5,15 +5,17 @@ use std::collections::{HashMap, HashSet};
 #[cfg(test)]
 use std::fs;
 use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
-use super::checksum::Crc32c;
+use super::checksum::{crc32c, Crc32c};
 use super::frame::{compress_archive_stream, read_error, DecompressReader};
 use super::memory::{try_buffer, try_capacity, try_filled, HostBudget};
 use super::safe_fs::{
     absolute_path, open_regular_file, Directory, IfMissing, Kind, StagingDirectory,
 };
+mod fragments;
 mod grouping;
 pub mod inventory;
 pub mod managed;
@@ -382,10 +384,18 @@ pub fn create_solid_archive_excluding<P: AsRef<Path>, W: Write>(
         excluded,
         grouping::Order::SharedRanges,
         |input, length| {
-            let sized = CompressionOptions {
+            let mut sized = CompressionOptions {
                 input_length: Some(length),
                 ..o.clone()
             };
+            if let Some(reservation) = fragments::reserve(input, &sized, &host)? {
+                if let Some(compacted) = fragments::prepare(input, length as usize)? {
+                    sized.input_length = Some(compacted.len() as u64);
+                    return compress_archive_stream(&mut Cursor::new(compacted), w, &sized, host)
+                        .map(|(_, n)| n);
+                }
+                drop(reservation);
+            }
             compress_archive_stream(input, w, &sized, host).map(|(_, n)| n)
         },
     )
@@ -627,7 +637,7 @@ fn extract_details<R: Read>(
             limits: stream_limits,
             execution: options.execution.clone(),
         },
-        host,
+        host.clone(),
     )?;
     if z.kind() != StreamKind::DirectoryArchive {
         return Err(BatoError::CorruptStream(
@@ -636,7 +646,13 @@ fn extract_details<R: Read>(
     }
     let mut catalogue_limits = l.clone();
     catalogue_limits.max_metadata_bytes = metadata_limit;
-    let extracted = materialize_catalogue(&mut z, target.stage.directory(), &catalogue_limits)?;
+    let version = z.version_minor();
+    let extracted = materialize_catalogue(
+        &mut z,
+        target.stage.directory(),
+        (&catalogue_limits, &host),
+        version,
+    )?;
     z.finish()?;
     target.publish(overwrite, members)?;
     Ok(extracted)
@@ -679,7 +695,12 @@ pub(crate) fn restore_catalogue_details(
     limits.max_metadata_bytes = limits.max_metadata_bytes.min(host.limit() / 4);
     let _metadata = host.reserve(limits.max_metadata_bytes.saturating_add(512 * 1024))?;
     let target = CatalogueTarget::open(destination)?;
-    let extracted = materialize_catalogue(catalogue, target.stage.directory(), &limits)?;
+    let extracted = materialize_catalogue(
+        catalogue,
+        target.stage.directory(),
+        (&limits, &host),
+        super::types::VERSION_MINOR,
+    )?;
     target.publish(overwrite, members)?;
     Ok(extracted)
 }
@@ -687,7 +708,8 @@ pub(crate) fn restore_catalogue_details(
 fn materialize_catalogue(
     z: &mut impl Read,
     stage: &Directory,
-    l: &DecodeLimits,
+    (l, host): (&DecodeLimits, &Arc<HostBudget>),
+    version: u8,
 ) -> Result<Extracted, BatoError> {
     let metadata_limit = l.max_metadata_bytes;
     let mut file_paths = Vec::<PathBuf>::new();
@@ -695,9 +717,17 @@ fn materialize_catalogue(
     let mut total_output = 0u64;
     let mut metadata_bytes = 0usize;
     let mut seen_paths = HashSet::new();
+    let mut fragment_memory = None;
     loop {
         let mut k = [0];
         catalogue_exact(z, &mut k, BatoError::TruncatedHeader)?;
+        if k[0] == fragments::START {
+            if count != 0 || fragment_memory.is_some() || version < fragments::VERSION {
+                return Err(BatoError::CorruptStream("invalid fragment catalogue marker".into()));
+            }
+            fragment_memory = Some(host.reserve(fragments::LIMIT)?);
+            continue;
+        }
         if k[0] == 0 {
             break;
         }
@@ -762,6 +792,9 @@ fn materialize_catalogue(
                 limit: l.max_output_bytes as usize,
             });
         }
+        if fragment_memory.is_some() && total_output > fragments::LIMIT as u64 {
+            return Err(BatoError::CorruptStream("fragment catalogue is too large".into()));
+        }
         if k[0] == 2 {
             let mut f = stage.create_file(&out).map_err(err)?;
             let mut left = size;
@@ -823,6 +856,31 @@ fn materialize_catalogue(
             if expected != computed {
                 return Err(BatoError::ChecksumMismatch { expected, computed });
             }
+            super::memory::try_reserve(&mut file_paths, 1)?;
+            file_paths.push(out);
+        } else if k[0] == fragments::MEMBER && fragment_memory.is_some() {
+            let bytes = fragments::read_member(z, size, |id, offset, buffer| {
+                let path = file_paths
+                    .get(id)
+                    .ok_or_else(|| BatoError::CorruptStream("invalid fragment file id".into()))?;
+                let mut file = stage.open_file(path)?;
+                let size = file.metadata()?.len();
+                let end = (offset as u64).checked_add(buffer.len() as u64);
+                if end.is_none_or(|end| end > size) {
+                    return Err(BatoError::CorruptStream("invalid fragment file range".into()));
+                }
+                file.seek(SeekFrom::Start(offset as u64))?;
+                file.read_exact(buffer)?;
+                Ok(())
+            })?;
+            let mut check = [0; 4];
+            catalogue_exact(z, &mut check, BatoError::TruncatedHeader)?;
+            let expected = u32::from_le_bytes(check);
+            let computed = crc32c(&bytes);
+            if expected != computed {
+                return Err(BatoError::ChecksumMismatch { expected, computed });
+            }
+            stage.create_file(&out)?.write_all(&bytes)?;
             super::memory::try_reserve(&mut file_paths, 1)?;
             file_paths.push(out);
         } else {

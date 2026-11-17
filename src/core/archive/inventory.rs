@@ -1,11 +1,12 @@
 //! Verified catalogue inspection without materializing members.
 use super::{
-    catalogue_exact, validate_path, BatoError, DecompressReader, DecompressionOptions, HostBudget,
-    Read, Sha256, StreamKind, COPY_BUFFER,
+    catalogue_exact, fragments, validate_path, BatoError, DecompressReader, DecompressionOptions,
+    HostBudget, Read, Sha256, StreamKind, COPY_BUFFER,
 };
-use crate::core::checksum::Crc32c;
+use crate::core::{checksum::{crc32c, Crc32c}, memory::try_buffer};
 use sha2::Digest;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Entry {
@@ -42,17 +43,26 @@ pub(super) fn inspect(
         .max_output_bytes
         .saturating_add(metadata_limit as u64)
         .saturating_add(5);
-    let mut source = DecompressReader::with_budget(source, &stream, host)?;
+    let mut source = DecompressReader::with_budget(source, &stream, host.clone())?;
     if source.kind() != StreamKind::DirectoryArchive {
         return Err(invalid("inspection requires a directory archive"));
     }
     let mut entries = Inventory::new();
     let mut files = Vec::<(Entry, u32)>::new();
+    let mut contents = Vec::<Arc<Vec<u8>>>::new();
+    let mut fragment_memory = None;
     let mut buffer = vec![0; COPY_BUFFER];
     let mut total = 0u64;
     let mut metadata = 0usize;
     loop {
         let [kind] = read(&mut source)?;
+        if kind == fragments::START {
+            if !entries.is_empty() || fragment_memory.is_some() || source.version_minor() < fragments::VERSION {
+                return Err(invalid("invalid fragment catalogue marker"));
+            }
+            fragment_memory = Some(host.reserve(fragments::LIMIT)?);
+            continue;
+        }
         if kind == 0 {
             break;
         }
@@ -76,7 +86,29 @@ pub(super) fn inspect(
                 .checked_add(size)
                 .filter(|&n| n <= limits.max_output_bytes)
                 .ok_or_else(|| invalid("archive files exceed inspection output limit"))?;
-            let (entry, crc) = match kind {
+            if fragment_memory.is_some() && total > fragments::LIMIT as u64 {
+                return Err(invalid("fragment catalogue is too large"));
+            }
+            let (entry, crc, raw) = match kind {
+                2 | fragments::MEMBER if fragment_memory.is_some() => {
+                    let bytes = if kind == 2 {
+                        let mut bytes = try_buffer(size as usize)?;
+                        catalogue_exact(&mut source, &mut bytes, BatoError::TruncatedHeader)?;
+                        bytes
+                    } else {
+                        fragments::read_member(&mut source, size, |id, offset, output| {
+                            let end = offset.checked_add(output.len())
+                                .ok_or_else(|| invalid("invalid fragment file range"))?;
+                            let bytes = contents.get(id)
+                                .and_then(|data| data.get(offset..end))
+                                .ok_or_else(|| invalid("invalid fragment file range or id"))?;
+                            output.copy_from_slice(bytes);
+                            Ok(())
+                        })?
+                    };
+                    let entry = Entry { size, sha256: Sha256::digest(&bytes).into() };
+                    (entry, crc32c(&bytes), Some(Arc::new(bytes)))
+                }
                 2 => {
                     let mut crc = Crc32c::new();
                     let mut sha = Sha256::new();
@@ -94,6 +126,7 @@ pub(super) fn inspect(
                             sha256: sha.finalize().into(),
                         },
                         crc.finalize(),
+                        None,
                     )
                 }
                 3 => {
@@ -104,7 +137,7 @@ pub(super) fn inspect(
                     if entry.size != size {
                         return Err(invalid("duplicate size mismatch"));
                     }
-                    (entry.clone(), *crc)
+                    (entry.clone(), *crc, contents.get(index).cloned())
                 }
                 _ => return Err(invalid("unknown archive entry type")),
             };
@@ -116,6 +149,9 @@ pub(super) fn inspect(
                 });
             }
             files.push((entry.clone(), crc));
+            if let Some(bytes) = raw {
+                contents.push(bytes);
+            }
             Some(entry)
         };
         if entries.insert(name, entry).is_some() {

@@ -23,6 +23,7 @@ mod models;
 mod numbers;
 mod predictor;
 pub mod profile;
+mod raw_noise;
 pub(crate) mod segment;
 mod simd;
 mod spatial;

@@ -1,0 +1,90 @@
+name: Bato CPU rebuild validation
+
+on:
+  push:
+    branches: [codex/bato-rebuild-validation]
+
+permissions:
+  contents: read
+
+jobs:
+  paired:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_PROFILE_RELEASE_LTO: thin
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Format and expose the formatting delta
+        run: |
+          cargo fmt --all
+          git diff
+      - name: Validate changed CPU paths
+        run: |
+          cargo test --release --no-default-features --locked --test cpu_shortcuts --test cm_golden --test archive_decode --test cm_framing --test framing --test x86_transform
+          python3 -m unittest discover -s scripts/tests
+      - name: Build both revisions
+        run: |
+          cargo build --release --no-default-features --locked --bin bato
+          cp target/release/bato /tmp/bato-rebuilt
+          git worktree add --detach /tmp/bato-stock-tree 89f0ff971397d67b8a421d4ee164a642528130f1
+          CARGO_TARGET_DIR="$PWD/target" cargo build --manifest-path /tmp/bato-stock-tree/Cargo.toml --release --no-default-features --locked --bin bato
+          cp target/release/bato /tmp/bato-stock
+      - name: Paired CPU measurements
+        run: |
+          python3 - <<'PY'
+          import hashlib, pathlib, resource, statistics, subprocess, tempfile, time
+          
+          chunk = 64 * 1024
+          noise = b"".join(hashlib.sha256(i.to_bytes(8, "little")).digest()
+                           for i in range(9 * chunk // 32))
+          common = ["--threads", "2", "--compute", "cpu", "--memory-budget", "2000000000"]
+          geometry = ["--segment-size", str(8 * chunk), "--chunk-size", str(chunk)]
+          tools = {variant: "/tmp/bato-" + variant for variant in ["stock", "rebuilt"]}
+          note = pathlib.Path("docs/validation.md").read_bytes()
+          def usage():
+              t = resource.getrusage(resource.RUSAGE_CHILDREN)
+              return t.ru_utime + t.ru_stime
+          def run(binary, *args):
+              start, cpu = time.perf_counter(), usage()
+              subprocess.run([binary, *args], check=True, stdout=subprocess.DEVNULL)
+              return time.perf_counter() - start, usage() - cpu
+          def snapshot(path):
+              if path.is_file():
+                  return path.read_bytes()
+              return {p.relative_to(path): p.read_bytes() for p in path.rglob("*") if p.is_file()}
+          with tempfile.TemporaryDirectory() as tmp:
+              root = pathlib.Path(tmp)
+              repeats, mixed, stored, edited = (root / name for name in ("repeats", "mixed", "stored", "edited"))
+              repeats.write_bytes(noise[:chunk] * 8)
+              mixed.write_bytes(noise[:7 * chunk] + note[:chunk])
+              stored.write_bytes(noise[:8 * chunk])
+              edited.mkdir()
+              data = noise[:2 * chunk]
+              (edited / "a").write_bytes(data)
+              (edited / "b").write_bytes(data[:2000] + b"modified region" * 10 + data[2159:])
+              (edited / "c").write_bytes(data[:98000] + b"\xff" * 128 + data[98040:])
+              for case in (repeats, mixed, stored, edited):
+                  directory = case.is_dir()
+                  expected = snapshot(case)
+                  results = {label: [] for label in tools}
+                  for rep in range(3):
+                      for variant in (("stock", "rebuilt") if rep % 2 == 0 else ("rebuilt", "stock")):
+                          with tempfile.TemporaryDirectory(dir=root) as run_dir:
+                              archive, restored = (pathlib.Path(run_dir) / name for name in ("out.bato", "restored"))
+                              enc = run(tools[variant], "archive" if directory else "-c", str(case),
+                                        "-o", str(archive), *common, *geometry)
+                              dec = run(tools[variant], "extract" if directory else "-d", str(archive),
+                                        "-o", str(restored), *common)
+                              assert snapshot(restored) == expected, (case, variant, rep)
+                              results[variant].append((archive.stat().st_size, *enc, *dec))
+                  for variant, trials in results.items():
+                      median = [statistics.median(series) for series in zip(*trials)]
+                      print("PAIRED", case.name, variant, *median, flush=True)
+          PY

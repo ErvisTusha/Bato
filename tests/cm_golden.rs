@@ -1,5 +1,36 @@
 use bato_engine::*;
 use sha2::{Digest, Sha256};
+use std::io::Cursor;
+
+fn explicit_sizes(encoded: &[u8]) -> Vec<u8> {
+    let mut reader = Cursor::new(encoded);
+    let stream = read_stream_header(&mut reader).unwrap();
+    let geometry = read_geometry(&mut reader).unwrap();
+    let mut legacy = encoded[..10].to_vec();
+    legacy[5] = 22;
+    loop {
+        let start = reader.position() as usize;
+        let header = read_stream_block_header(&mut reader, &stream, geometry).unwrap();
+        if header.block_type == BlockType::EndOfStream {
+            legacy.extend_from_slice(&encoded[start..]);
+            return legacy;
+        }
+        let end = reader.position() as usize + header.compressed_size as usize + 4;
+        if encoded[start + 1] == 0 {
+            legacy.push(encoded[start]);
+            let mut size = header.uncompressed_size;
+            while size >= 128 {
+                legacy.push(size as u8 | 128);
+                size >>= 7;
+            }
+            legacy.push(size as u8);
+            legacy.extend_from_slice(&encoded[start + 2..end]);
+        } else {
+            legacy.extend_from_slice(&encoded[start..end]);
+        }
+        reader.set_position(end as u64);
+    }
+}
 
 fn check(expected: &str) {
     let fixture: Vec<_> = b"original integer CM framing and predictor fixture\n"
@@ -25,10 +56,10 @@ fn check(expected: &str) {
         },
         ..Default::default()
     };
-    let mut encoded = compress_with_options(&fixture, &options).unwrap();
+    let encoded = compress_with_options(&fixture, &options).unwrap();
     assert_eq!(encoded[5], VERSION_MINOR);
     assert_eq!(decompress(&encoded).unwrap(), fixture);
-    encoded[5] = 22;
+    let encoded = explicit_sizes(&encoded);
     assert_eq!(format!("{:x}", Sha256::digest(&encoded)), expected);
     assert_eq!(decompress(&encoded).unwrap(), fixture);
 }

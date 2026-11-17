@@ -11,6 +11,7 @@ use super::{
     fast, filters, fragments, lz,
     predictor::{self, pipeline, Engine, Predictor, Stages},
     profile::{Step, Timing},
+    raw_noise,
     simd::Dispatch,
     spatial, varint, x86,
 };
@@ -269,6 +270,17 @@ pub(crate) fn encode_segment(
     if raw.is_empty() {
         return Ok((Vec::new(), plain(TransformId::None)));
     }
+    if let Some(period) = timing.time(Step::FastCandidates, || {
+        raw_noise::periodic(raw, descriptor.chunk_bytes())
+    }) {
+        let chunk = Chunk {
+            kind: BlockType::Lz,
+            length: raw.len() as u32,
+            payload: lz::encode_period(raw, period)?,
+            crc: crc32c(raw),
+        };
+        return Ok((vec![chunk], plain(TransformId::None)));
+    }
     let x86 = timing.time(Step::TransformSelection, || x86::select(raw))?;
     let independent = timing.time(Step::FastCandidates, || {
         fast::best(raw, x86.map(x86::Sites::transform), &mut accelerator)
@@ -380,6 +392,13 @@ pub(crate) fn encode_segment(
                 );
             }
         }
+    }
+    if winner.1[0].kind == BlockType::Stored && raw_noise::uniform(raw) {
+        return Ok((winner.1, winner.2));
+    }
+    if let Some(chunk) = encode_cold_tail(raw, (descriptor, trials), (winner.0, original_crc), timing)?
+    {
+        return Ok((vec![chunk], plain(TransformId::None)));
     }
     let min_frame = minimum(raw.len());
     // The x86, filter and plain candidates have the same length and need
@@ -650,6 +669,89 @@ fn encode_fragment_packet(
     Ok(Some(packet))
 }
 
+fn encode_cold_tail(
+    raw: &[u8],
+    (descriptor, trials): (Descriptor, Trials),
+    (limit, crc): (usize, u32),
+    timing: Timing<'_>,
+) -> Result<Option<Chunk>, BatoError> {
+    let Some(prefix) = raw_noise::cold_prefix(raw, descriptor.chunk_bytes()) else {
+        return Ok(None);
+    };
+    let overhead = 3 + varint::len(prefix as u64);
+    let Some(budget) = limit.checked_sub(prefix + overhead) else {
+        return Ok(None);
+    };
+    let Some((_, primer, chunks)) = model_candidate(
+        &raw[prefix..],
+        (descriptor, trials, descriptor.chunk_bytes()),
+        budget,
+        (timing, &mut Snapshot::new(false)),
+    )? else {
+        return Ok(None);
+    };
+    let [tail] = chunks.as_slice() else {
+        return Ok(None);
+    };
+    let packed = prefix + overhead + tail.payload.len();
+    let kind = BlockType::LzHuffman;
+    if tail.kind != BlockType::Coded
+        || tail.payload.is_empty()
+        || crate::core::frame::compact_block_cost(kind, raw.len(), packed, descriptor) >= limit
+    {
+        return Ok(None);
+    }
+    let mut payload = try_capacity(packed)?;
+    payload.extend_from_slice(&[0, 0, u8::from(primer == Primer::Skipped)]);
+    varint::push(&mut payload, prefix);
+    payload.extend_from_slice(&raw[..prefix]);
+    payload.extend_from_slice(&tail.payload);
+    Ok(Some(Chunk {
+        kind,
+        length: raw.len() as u32,
+        payload,
+        crc,
+    }))
+}
+
+fn decode_cold_tail(
+    packet: &[u8],
+    descriptor: Descriptor,
+    length: usize,
+    timing: Timing<'_>,
+) -> Result<Vec<u8>, BatoError> {
+    let invalid = || BatoError::CorruptStream("invalid stored-prefix packet".into());
+    let primer = match packet.first() {
+        Some(0) => Primer::Read,
+        Some(1) => Primer::Skipped,
+        _ => return Err(invalid()),
+    };
+    let mut at = 1;
+    let prefix = varint::take(packet, &mut at)?;
+    let tail = length.checked_sub(prefix).ok_or_else(invalid)?;
+    let chunk = descriptor.chunk_bytes();
+    if prefix < 3 * chunk || !prefix.is_multiple_of(chunk) || tail == 0 || tail > chunk {
+        return Err(invalid());
+    }
+    let end = at.checked_add(prefix).ok_or_else(invalid)?;
+    let stored = packet.get(at..end).ok_or_else(invalid)?;
+    let coded = &packet[end..];
+    if coded.is_empty() || coded.len() >= tail {
+        return Err(invalid());
+    }
+    let block = Chunk {
+        kind: BlockType::Coded,
+        length: tail as u32,
+        payload: try_copy(coded)?,
+        crc: 0,
+    };
+    let decoded = decode_chunks(&[block], descriptor, tail, (primer, timing))?;
+    let mut output = try_capacity(length)?;
+    output.extend_from_slice(stored);
+    output.extend_from_slice(&decoded);
+    Ok(output)
+}
+
 fn decode_fragment_packet(
     packet: &[u8],
     descriptor: Descriptor,
@@ -766,7 +868,11 @@ pub(crate) fn decode_segment(
                     "invalid fragment block flags".into(),
                 ));
             }
-            let output = decode_fragment_packet(&chunk.payload[1..], descriptor, n, timing)?;
+            let output = if let Some(tail) = chunk.payload.strip_prefix(&[0, 0]) {
+                decode_cold_tail(tail, descriptor, n, timing)?
+            } else {
+                decode_fragment_packet(&chunk.payload[1..], descriptor, n, timing)?
+            };
             timing.time(Step::Checksum, || verify_chunks(chunks, &output))?;
             return Ok(output);
         }

@@ -41,12 +41,12 @@ fn options() -> CompressionOptions {
 /// Offsets of every block header after the 10-byte stream header.
 fn headers(encoded: &[u8]) -> Vec<(usize, BlockHeader)> {
     let mut reader = Cursor::new(encoded);
-    read_stream_header(&mut reader).unwrap();
-    read_geometry(&mut reader).unwrap();
+    let stream = read_stream_header(&mut reader).unwrap();
+    let geometry = read_geometry(&mut reader).unwrap();
     let mut found = Vec::new();
     loop {
         let at = reader.position() as usize;
-        let header = read_block_header(&mut reader).unwrap();
+        let header = read_stream_block_header(&mut reader, &stream, geometry).unwrap();
         if header.block_type == BlockType::EndOfStream {
             return found;
         }
