@@ -3,12 +3,15 @@ name: Bato CPU rebuild validation
 on:
   push:
     branches: [codex/bato-rebuild-validation]
+  pull_request:
+    branches: [claude/focused-faraday-t2c712]
 
 permissions:
   contents: read
 
 jobs:
   paired:
+    if: github.event_name == 'push' || github.head_ref == 'codex/bato-rebuild-validation'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
