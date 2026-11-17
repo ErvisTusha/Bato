@@ -20,6 +20,30 @@ fn wrap(records: &[u8]) -> Vec<u8> {
     encoded[6] |= bato_engine::core::types::FLAG_DIRECTORY_ARCHIVE;
     encoded
 }
+fn wrap_small_stored(records: &[u8]) -> Vec<u8> {
+    // The mutation test needs a valid outer frame for each catalogue, so it
+    // can reach the record parser without running the compressor 500 times.
+    assert!(!records.is_empty() && records.len() < 128);
+    let mut encoded = Vec::new();
+    let options = CompressionOptions {
+        geometry: Geometry {
+            segment_size: 64 * 1024,
+            chunk_size: 16 * 1024,
+            table_log2: 16,
+        },
+        ..Default::default()
+    };
+    bato_engine::core::frame::write_stream_header(&mut encoded, &options).unwrap();
+    encoded[6] |= bato_engine::core::types::FLAG_DIRECTORY_ARCHIVE;
+    let length = records.len() as u8;
+    let crc = bato_engine::core::checksum::crc32c(records).to_le_bytes();
+    encoded.extend_from_slice(&[BlockType::Stored as u8, length]);
+    encoded.extend_from_slice(records);
+    encoded.extend_from_slice(&crc);
+    encoded.extend_from_slice(&[BlockType::EndOfStream as u8, length]);
+    encoded.extend_from_slice(&crc);
+    encoded
+}
 fn path(v: &mut Vec<u8>, kind: u8, p: &str) {
     v.push(kind);
     v.extend_from_slice(&(p.len() as u16).to_le_bytes());
@@ -170,6 +194,13 @@ fn bounded_record_mutation_fuzz() {
         max_archive_entries: 32,
         max_path_bytes: 256,
     };
+    extract_solid_archive_with_options(
+        &mut Cursor::new(wrap_small_stored(&seed)),
+        t.path().join("valid"),
+        &limits,
+        Overwrite::Refuse,
+    )
+    .unwrap();
     let mut rng = 192891u64;
     for i in 0..500 {
         let mut v = seed.clone();
@@ -182,7 +213,7 @@ fn bounded_record_mutation_fuzz() {
         }
         let dest = t.path().join(format!("out{i}"));
         let _ = extract_solid_archive_with_options(
-            &mut Cursor::new(wrap(&v)),
+            &mut Cursor::new(wrap_small_stored(&v)),
             &dest,
             &limits,
             bato_engine::Overwrite::Refuse,
@@ -261,8 +292,9 @@ fn extraction_preserves_outer_checksum_and_output_limit_errors() {
     catalogue.push(0);
     let mut encoded = wrap(&catalogue);
     let mut header = Cursor::new(&encoded);
-    header.set_position(10);
-    let block = read_block_header(&mut header).unwrap();
+    let stream = read_stream_header(&mut header).unwrap();
+    let geometry = read_geometry(&mut header).unwrap();
+    let block = read_stream_block_header(&mut header, &stream, geometry).unwrap();
     let crc_at = header.position() as usize + block.compressed_size as usize;
     encoded[crc_at] ^= 1;
     assert!(matches!(

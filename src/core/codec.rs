@@ -20,6 +20,8 @@ use std::{
 const HOST_RESERVE: usize = 64 * 1024 * 1024;
 /// Stack size of every worker thread, charged to the memory budget.
 const STACK_MEMORY: usize = 2 * 1024 * 1024;
+/// Start the workers only after this much cheap decoding on the caller.
+const INLINE_DECODE_LIMIT: usize = 1024 * 1024;
 
 /// Workers admitted for one stream and the host memory they reserve.
 #[derive(Debug, Clone)]
@@ -137,12 +139,37 @@ fn execute(
             ))
         }
         Work::Decode {
-            chunks,
+            mut chunks,
             descriptor,
             coding,
         } => {
             let timing = stats.timing();
             let max_output = descriptor.segment_bytes();
+            let verified_crc = match chunks.as_mut_slice() {
+                [chunk] if coding.transform == TransformId::None => {
+                    if chunk.kind == BlockType::Stored
+                        && chunk.length != 0
+                        && chunk.length as usize == chunk.payload.len()
+                        && chunk.payload.len() <= max_output
+                    {
+                        descriptor.validate()?;
+                        let computed = timing.time(Step::Checksum, || crc32c(&chunk.payload));
+                        if computed != chunk.crc {
+                            return Err(BatoError::ChecksumMismatch {
+                                expected: chunk.crc,
+                                computed,
+                            });
+                        }
+                        stats.update(|s| s.cpu_blocks += 1);
+                        return Ok(Output::Decoded {
+                            bytes: std::mem::take(&mut chunk.payload),
+                            crc: computed,
+                        });
+                    }
+                    Some(chunk.crc)
+                }
+                _ => None,
+            };
             let bytes = segment::decode_segment(
                 &chunks,
                 (descriptor, max_output),
@@ -152,7 +179,7 @@ fn execute(
             )?;
             stats.update(|s| s.cpu_blocks += chunks.len() as u64);
             Ok(Output::Decoded {
-                crc: timing.time(Step::Checksum, || crc32c(&bytes)),
+                crc: verified_crc.unwrap_or_else(|| timing.time(Step::Checksum, || crc32c(&bytes))),
                 bytes,
             })
         }
@@ -162,12 +189,20 @@ fn execute(
 type Job = (u64, Work, MemoryLease);
 type JobResult = (u64, Result<Completed, BatoError>);
 
+struct WorkerStartup {
+    incoming: Arc<Mutex<mpsc::Receiver<Job>>>,
+    finished: mpsc::Sender<JobResult>,
+    options: ExecutionOptions,
+}
+
 /// Runs segments on worker threads and returns their results in submission
 /// order. Each job holds a memory lease until its result is consumed.
 pub(crate) struct Pool {
     jobs: Option<mpsc::Sender<Job>>,
     results: mpsc::Receiver<JobResult>,
     handles: Vec<JoinHandle<()>>,
+    startup: Option<WorkerStartup>,
+    inline_bytes: usize,
     ready: BTreeMap<u64, Result<Completed, BatoError>>,
     next: u64,
     submitted: u64,
@@ -193,21 +228,16 @@ impl Pool {
         let (jobs, incoming) = mpsc::channel::<Job>();
         let incoming = Arc::new(Mutex::new(incoming));
         let (finished, results) = mpsc::channel::<JobResult>();
-        let mut handles = Vec::with_capacity(admission.workers);
-        let accelerators = Arc::new(FilterPool::default());
-        for worker in 0..admission.workers {
-            let incoming = incoming.clone();
-            let finished = finished.clone();
-            let options = options.clone();
-            let accelerators = accelerators.clone();
-            handles.push(std::thread::Builder::new().stack_size(STACK_MEMORY).spawn(
-                move || run_worker(&incoming, &finished, &options, (&accelerators, worker)),
-            )?);
-        }
-        Ok(Self {
+        let mut pool = Self {
             jobs: Some(jobs),
             results,
-            handles,
+            handles: Vec::with_capacity(admission.workers),
+            startup: Some(WorkerStartup {
+                incoming,
+                finished,
+                options: options.clone(),
+            }),
+            inline_bytes: 0,
             ready: BTreeMap::new(),
             next: 0,
             submitted: 0,
@@ -217,7 +247,38 @@ impl Pool {
             parallel_trials_memory: (direction == Direction::Encode)
                 .then(|| segment::parallel_trials_memory(descriptor)),
             _infrastructure: infrastructure,
-        })
+        };
+        if direction == Direction::Encode {
+            pool.start_workers()?;
+        }
+        Ok(pool)
+    }
+
+    fn start_workers(&mut self) -> Result<(), BatoError> {
+        let Some(WorkerStartup {
+            incoming,
+            finished,
+            options,
+        }) = self.startup.take()
+        else {
+            return Ok(());
+        };
+        let accelerators = Arc::new(FilterPool::default());
+        for worker in 0..self.admission.workers {
+            let incoming = incoming.clone();
+            let finished = finished.clone();
+            let options = options.clone();
+            let accelerators = accelerators.clone();
+            self.handles
+                .push(
+                    std::thread::Builder::new()
+                        .stack_size(STACK_MEMORY)
+                        .spawn(move || {
+                            run_worker(&incoming, &finished, &options, (&accelerators, worker))
+                        })?,
+                );
+        }
+        Ok(())
     }
 
     pub fn capacity(&self) -> usize {
@@ -272,6 +333,29 @@ impl Pool {
         if self.outstanding() >= self.capacity() {
             return Err(BatoError::CorruptStream("worker capacity exceeded".into()));
         }
+        if let (Some(startup), Work::Decode { chunks, coding, .. }) = (&self.startup, &job) {
+            if let [chunk] = chunks.as_slice() {
+                let total = self.inline_bytes.saturating_add(chunk.length as usize);
+                if total <= INLINE_DECODE_LIMIT
+                    && coding.transform == TransformId::None
+                    && matches!(
+                        chunk.kind,
+                        BlockType::Stored | BlockType::Lz | BlockType::Repeat
+                    )
+                {
+                    let accelerators = FilterPool::default();
+                    let options = &startup.options;
+                    let mut accelerator =
+                        WorkerFilters::new(&accelerators, (options.compute, &options.stats), 0);
+                    let result = run_job(job, lease, options, &mut accelerator);
+                    self.ready.insert(self.submitted, result);
+                    self.submitted += 1;
+                    self.inline_bytes = total;
+                    return Ok(());
+                }
+            }
+        }
+        self.start_workers()?;
         self.jobs
             .as_ref()
             .ok_or_else(|| BatoError::CorruptStream("worker stopped".into()))?
@@ -312,18 +396,27 @@ fn run_worker(
         let Ok((id, work, lease)) = incoming.lock().unwrap().recv() else {
             return;
         };
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            execute(work, &options.stats, &mut accelerator)
-        }))
-        .unwrap_or_else(|_| Err(BatoError::CorruptStream("worker panicked".into())))
-        .map(|output| Completed {
-            output,
-            memory: Some(lease),
-        });
+        let result = run_job(work, lease, options, &mut accelerator);
         if finished.send((id, result)).is_err() {
             return;
         }
     }
+}
+
+fn run_job(
+    work: Work,
+    lease: MemoryLease,
+    options: &ExecutionOptions,
+    accelerator: &mut WorkerFilters<'_>,
+) -> Result<Completed, BatoError> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        execute(work, &options.stats, accelerator)
+    }))
+    .unwrap_or_else(|_| Err(BatoError::CorruptStream("worker panicked".into())))
+    .map(|output| Completed {
+        output,
+        memory: Some(lease),
+    })
 }
 
 impl Drop for Pool {
@@ -421,6 +514,56 @@ mod tests {
             assert_eq!(original.length as usize, raw.len());
         }
         assert_eq!(pool.outstanding(), 0);
+    }
+
+    #[test]
+    fn inline_stored_jobs_remain_ordered_when_decoder_workers_start() {
+        let options = ExecutionOptions {
+            threads: 3,
+            compute: Compute::Cpu,
+            ..Default::default()
+        };
+        let host = HostBudget::new(MemoryBudget::Bytes(usize::MAX / 2), &options.stats).unwrap();
+        let mut pool = Pool::new((descriptor(), Direction::Decode), host, &options).unwrap();
+        let raw = vec![0; 256];
+        let crc = crc32c(&raw);
+        for (transform, expected_crc) in [
+            (TransformId::None, crc),
+            (TransformId::None, crc ^ 1),
+            (TransformId::Delta1, crc),
+        ] {
+            let lease = pool.prepare_job().unwrap();
+            pool.submit(
+                Work::Decode {
+                    chunks: vec![Chunk {
+                        kind: BlockType::Stored,
+                        length: raw.len() as u32,
+                        payload: raw.clone(),
+                        crc: expected_crc,
+                    }],
+                    descriptor: descriptor(),
+                    coding: Coding {
+                        transform,
+                        primer: Primer::Read,
+                    },
+                },
+                lease,
+            )
+            .unwrap();
+            assert_eq!(pool.handles.is_empty(), transform == TransformId::None);
+        }
+        assert!(matches!(
+            pool.receive().unwrap().output,
+            Output::Decoded { bytes, crc: computed } if bytes == raw && computed == crc
+        ));
+        assert!(matches!(
+            pool.receive(),
+            Err(BatoError::ChecksumMismatch { .. })
+        ));
+        assert!(matches!(
+            pool.receive().unwrap().output,
+            Output::Decoded { bytes, crc: computed } if bytes == raw && computed == crc
+        ));
     }
 
     #[test]

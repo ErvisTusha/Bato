@@ -122,6 +122,18 @@ pub(super) fn encode(raw: &[u8]) -> Result<Vec<u8>, BatoError> {
     }
     Ok(output)
 }
+/// Write one literal period followed by a single verified overlapping copy.
+pub(super) fn encode_period(raw: &[u8], period: usize) -> Result<Vec<u8>, BatoError> {
+    let count = raw.len() - period;
+    debug_assert!(period >= MIN_MATCH && count >= MIN_MATCH);
+    let mut output = crate::core::memory::try_capacity(period + 15)?;
+    varint::push(&mut output, period << 1);
+    output.extend_from_slice(&raw[..period]);
+    varint::push(&mut output, ((count - MIN_MATCH) << 1) | 1);
+    varint::push(&mut output, period);
+    Ok(output)
+}
+
 pub(super) fn decode(payload: &[u8], length: usize) -> Result<Vec<u8>, BatoError> {
     let mut output = crate::core::memory::try_capacity(length)?;
     let mut at = 0;

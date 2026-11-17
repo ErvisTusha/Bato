@@ -1353,3 +1353,45 @@ scheduler experiment above. They produced byte-identical archives.
 The real Bato revisions and both controls had higher pack wall times.
 The unrelated mixed tree also had higher restore wall time. The
 constructed revision cases accounted for most of the savings.
+
+### CPU shortcuts and native directory fragment reuse (format 1.25)
+
+The comparison uses stock `89f0ff9` (format 1.24) and this rebuild on
+the same Linux host with nine logical CPUs. Both binaries were built in
+release mode with thin LTO and without GPU features. Both used
+`--threads 0 --compute cpu --memory-budget 7730941132`. The three
+synthetic files used 512 KiB segments and 64 KiB chunks. The other inputs
+used automatic geometry. Directories used native `archive` and
+`extract`. Runs alternated the starting revision. Every file passed
+`cmp`, and every directory's paths, sizes and file SHA-256 hashes
+matched after restoration. Times are seconds, with medians for rows
+with three pairs. CPU time sums user and system time across threads.
+
+| Input | Pairs | Archive bytes, stock → rebuild | Encode wall | Encode CPU | Decode wall | Decode CPU |
+|---|---:|---:|---:|---:|---:|---:|
+| Exact repeats of a 64 KiB opaque tile | 3 | 65,574 → 65,572 | 3.1466 → 0.0077 | 3.1217 → 0.0076 | 0.0081 → 0.0036 | 0.0059 → 0.0026 |
+| 448 KiB opaque prefix and 64 KiB Calgary `book1` tail | 3 | 479,857 → 478,566 | 12.4637 → 2.3211 | 12.4278 → 2.2758 | 6.8930 → 1.5686 | 6.8627 → 1.5551 |
+| 512 KiB opaque file | 3 | 524,314 → 524,312 | 13.6361 → 0.2649 | 13.5678 → 0.2203 | 0.0675 → 0.0040 | 0.0383 → 0.0031 |
+| Three edited copies of an opaque file, native directory | 3 | 393,184 → 131,209 | 3.9876 → 1.1194 | 20.3162 → 1.1702 | 0.0089 → 0.0646 | 0.0089 → 0.0331 |
+| `nom` 7.1.3 source directory | 3 | 54,280 → 49,540 | 4.0465 → 3.6893 | 25.4051 → 21.3396 | 2.7314 → 3.0836 | 17.7493 → 15.7556 |
+| Calgary `pic` | 1 | 26,175 → 26,161 | 3.5276 → 3.6980 | 21.2738 → 22.0548 | 0.5719 → 0.5692 | 1.6208 → 1.5930 |
+| Calgary `book1` | 1 | 222,098 → 222,088 | 5.3970 → 5.7705 | 27.0837 → 27.2200 | 3.7861 → 3.4791 | 16.2807 → 15.2274 |
+| Canterbury `kennedy.xls` | 1 | 18,359 → 18,345 | 6.5933 → 6.5121 | 40.8311 → 42.5801 | 1.9780 → 2.1780 | 13.8905 → 13.7809 |
+| Four bundled npm libraries, native directory | 1 | 361,388 → 355,967 | 11.1541 → 12.1360 | 79.2924 → 84.5491 | 6.8286 → 6.8286 | 47.8685 → 47.3860 |
+| Linux amd64 `gofmt`, Go 1.27.3 | 1 | 882,151 → 882,129 | 27.6176 → 24.7648 | 131.8280 → 131.2942 | 9.6018 → 10.1997 | 40.8157 → 50.7714 |
+
+The npm sample includes `diff` 8.0.3, `node-gyp` 12.2.0, `nopt` 9.0.0 and
+`semver` 7.7.3. The opaque inputs use deterministic SHA-256 output. The
+archive total fell from 3,027,380 to 2,753,889 bytes (9.0%). Most of the
+savings came from the constructed directory. Across the six real inputs
+alone, the total fell by 10,221 bytes, or 0.65%.
+
+Against stock, extraction of the edited directory cost 55.7 ms more wall
+time and 24.2 ms more CPU time. The `nom` directory cost 0.352 s more decode
+wall time while spending 1.994 s less decode CPU time. In the single-pair
+checks, Calgary `pic` and `book1` cost 4.8% and 6.9% more encode wall time,
+and the npm sample cost 8.8% more encode wall time. `kennedy.xls` cost 10.1%
+more decode wall time and 4.3% more encode CPU time. `gofmt` cost 6.2%
+more decode wall time and 24.4% more decode CPU time. Millisecond results
+are sensitive to process and filesystem overhead. This sample covers
+selected files and directories from the named inputs.

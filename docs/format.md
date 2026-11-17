@@ -1,7 +1,7 @@
-# Bato format 1.24
+# Bato format 1.25
 
 A `.bato` stream holds file bytes or a serialized directory tree. Bato 0.8
-writes format 1.24 and reads existing 1.22 and 1.23 streams.
+writes format 1.25 and reads existing 1.22 through 1.24 streams.
 
 The stream is a 10-byte header, zero or more blocks, and a footer. Fixed-width
 integers are little-endian. Variable integers are canonical unsigned LEB128:
@@ -14,7 +14,7 @@ follows; redundant leading zero groups and values exceeding u64 are rejected.
 |---|---|---|
 | 0 | 4 | `BATO` |
 | 4 | 1 | Major `1` |
-| 5 | 1 | Minor `24` for new streams, `22` or `23` for earlier streams |
+| 5 | 1 | Minor `25` for new streams, `22` through `24` for earlier streams |
 | 6 | 1 | Flags: bit 0 directory archive; other bits zero |
 | 7 | 1 | Segment log2, 16..30 (default 26) |
 | 8 | 1 | CM chunk log2, 12..20, no greater than segment log2 (default 18) |
@@ -32,7 +32,10 @@ on the CM chunks (types 0 and 1) of a segment whose model skipped the primer
 (below); all chunks of a segment agree, and independent types must clear it.
 The standalone end marker is the byte `255`. Transform value 15 denotes an
 independent spatial block and requires type 4. Original length `n`
-follows as a variable integer. Types 1, 3, 4, 5 and 7 then encode payload length
+follows as a variable integer. In format 1.25, zero denotes the full segment
+length for independent types or the full chunk length for types 0 and 1.
+An explicit full length is noncanonical in this version. Earlier versions
+always write positive explicit lengths. Types 1, 3, 4, 5 and 7 then encode payload length
 `c` as a variable integer; it must be strictly smaller than `n`. The payload
 is followed by four bytes of CRC32C over the original, untransformed bytes.
 All lengths, segment boundaries and output limits are checked before payload
@@ -75,10 +78,12 @@ after its final coded chunk. Models restart at segment boundaries.
 The encoder compares complete block bytes, including size fields and CRCs.
 It tries the untransformed independent representations and five reversible
 filters. The existing x86 selector admits an x86 candidate. Context mixing
-remains a candidate with its existing x86 decision. Early termination uses
-only emitted coder bytes and mandatory framing as a lower bound, never a
-sampled compression estimate. No filename, MIME routing, or quality modes
-are involved. Encoder search is not normative; decoding semantics are.
+remains a candidate with its existing x86 decision. An active model trial
+can stop once its emitted bytes and mandatory framing exceed its budget.
+For high-entropy data the encoder can verify a repeated period, keep a
+stored segment, or model a short tail independently. The encoder uses byte
+patterns and complete-window distribution checks. Encoder search is not
+normative; decoding semantics are.
 
 ### Literal/copy commands
 
@@ -121,6 +126,15 @@ After context decoding and applying the inverse transform, interpret the
 token stream as literal/copy commands to produce exactly the outer size.
 The outer CRC32C covers the reconstructed segment. Trailing token or
 packet bytes are invalid.
+
+### Stored prefix with independent CM tail (type 5, format 1.25)
+
+Two zero variable integers select a stored prefix with a context-mixed tail.
+The packet holds a primer byte (0 reads the primer, 1 skips it), a variable
+integer prefix length, that many raw bytes, and one CM-coded chunk for the
+remainder. The prefix spans three or more whole chunks. The tail is nonempty
+and fits within one chunk. The outer transform is zero and its primer flag
+is clear. The tail starts a fresh model. The outer CRC32C covers both parts.
 
 ### Independent spatial packets (type 4, transform 15)
 
@@ -284,6 +298,8 @@ The stream's decoded bytes are a catalogue of entries, each starting with a kind
 | `1` | path length (u16) · path | directory |
 | `2` | path length (u16) · path · size (u64) · contents · CRC32C (u32) | file |
 | `3` | path length (u16) · path · size (u64) · id (u32) · CRC32C (u32) | file identical to the earlier file entry number `id`, stored once |
+| `4` | path length (u16) · path · size (u64) · recipe · CRC32C (u32) | file reconstructed from literals and ranges of earlier files |
+| `5` | — | first-byte marker for a catalogue using range recipes |
 | `0` | — | end of catalogue |
 
 Member order is selected by the encoder. Ordinary compact directory
@@ -291,6 +307,16 @@ archives may place files with shared byte ranges next to each other so
 the segment codec can reuse their fragments. An exact-duplicate record
 always references a file already emitted in the selected order.
 Checkpoint staging retains path order.
+
+The marker and range recipes require format 1.25. A marked catalogue
+materializes at most 8 MiB of file bytes. The recipe starts with a variable
+integer command count from 1 through 16,384. Each command contains four
+unsigned LEB128 values (literal length, earlier file ID, source offset,
+copy length) followed by its literal bytes. The copy length is at least
+192 bytes. The file ID counts file records from zero and skips directories.
+Every range must fit its earlier file. Any bytes left in the declared size
+after the last copy follow as literals. The checksum covers the entire
+restored member.
 
 Paths are UTF-8, use `/` separators, and are relative. Absolute paths, `..`, empty components, duplicates and names that would alias on the target filesystem are rejected. Extraction writes into a staging directory, enforces entry, path, metadata and output limits, verifies every checksum, and publishes the tree only after everything is valid.
 

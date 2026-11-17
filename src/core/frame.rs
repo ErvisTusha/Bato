@@ -43,12 +43,42 @@ pub(crate) fn block_cost(kind: BlockType, length: usize, payload: usize) -> usiz
         + payload
         + BLOCK_CRC_BYTES as usize
 }
-fn header_len(h: &BlockHeader) -> usize {
+fn full_length(kind: BlockType, shape: Descriptor) -> usize {
+    if kind.independent() {
+        shape.segment_bytes()
+    } else {
+        shape.chunk_bytes()
+    }
+}
+
+pub(crate) fn compact_block_cost(
+    kind: BlockType,
+    length: usize,
+    payload: usize,
+    shape: Descriptor,
+) -> usize {
+    block_cost(kind, length, payload) - length_savings(kind, length, Some(shape))
+}
+
+fn length_savings(kind: BlockType, length: usize, shape: Option<Descriptor>) -> usize {
+    if shape.is_some_and(|shape| full_length(kind, shape) == length) {
+        varint::len(length as u64) - 1
+    } else {
+        0
+    }
+}
+
+fn header_len(h: &BlockHeader, shape: Option<Descriptor>) -> usize {
     block_cost(
         h.block_type,
         h.uncompressed_size as usize,
         h.compressed_size as usize,
     )
+    .saturating_sub(length_savings(
+        h.block_type,
+        h.uncompressed_size as usize,
+        shape,
+    ))
     .saturating_sub(
         h.compressed_size as usize
             + if h.block_type == BlockType::EndOfStream {
@@ -104,7 +134,7 @@ fn write_block<W: Write>(
     w: &mut W,
     h: &BlockHeader,
     p: &[u8],
-    crc: Option<u32>,
+    footer: Option<(u32, Descriptor)>,
 ) -> Result<(), BatoError> {
     if h.block_type == BlockType::EndOfStream {
         w.write_all(&[255])?;
@@ -113,17 +143,43 @@ fn write_block<W: Write>(
     let skipped = u8::from(h.primer == Primer::Skipped) << 6;
     let transform = h.transform_id as u8;
     w.write_all(&[(h.block_type as u8) | (transform & 7) << 3 | skipped | (transform & 8) << 4])?;
-    varint::write(w, u64::from(h.uncompressed_size))?;
+    let length = h.uncompressed_size as usize;
+    let explicit = if footer.is_some_and(|(_, shape)| full_length(h.block_type, shape) == length) {
+        0
+    } else {
+        length as u64
+    };
+    varint::write(w, explicit)?;
     if !h.block_type.implicit_payload() {
         varint::write(w, u64::from(h.compressed_size))?;
     }
     w.write_all(p)?;
-    if let Some(c) = crc {
+    if let Some((c, _)) = footer {
         w.write_all(&c.to_le_bytes())?;
     }
     Ok(())
 }
+/// Reads a legacy block header whose length is encoded explicitly.
 pub fn read_block_header<R: Read>(r: &mut R) -> Result<BlockHeader, BatoError> {
+    read_sized_block_header(r, None)
+}
+
+/// Reads a block using the stream version and geometry from its header.
+pub fn read_stream_block_header<R: Read>(
+    r: &mut R,
+    stream: &StreamHeader,
+    geometry: Geometry,
+) -> Result<BlockHeader, BatoError> {
+    let shape = (stream.version_minor >= COMPACT_VERSION_MINOR)
+        .then(|| geometry.descriptor())
+        .transpose()?;
+    read_sized_block_header(r, shape)
+}
+
+fn read_sized_block_header<R: Read>(
+    r: &mut R,
+    shape: Option<Descriptor>,
+) -> Result<BlockHeader, BatoError> {
     let mut byte = [0];
     exact(r, &mut byte)?;
     if byte[0] == 255 {
@@ -152,7 +208,15 @@ pub fn read_block_header<R: Read>(r: &mut R) -> Result<BlockHeader, BatoError> {
             "independent block declares a primer choice".into(),
         ));
     }
-    let n = varint::read(r)?;
+    let literal = varint::read(r)?;
+    let full = shape.map(|shape| full_length(block_type, shape) as u64);
+    let n = if literal == 0 {
+        full.unwrap_or(0)
+    } else if full == Some(literal) {
+        return Err(BatoError::CorruptStream("noncanonical block length".into()));
+    } else {
+        literal
+    };
     let c = if block_type == BlockType::Repeat {
         1
     } else if block_type.implicit_payload() {
@@ -197,7 +261,7 @@ pub fn read_stream_layout<R: Read>(r: &mut R) -> Result<StreamLayout, BatoError>
     let geometry = read_geometry(r)?;
     let mut blocks = Vec::new();
     loop {
-        let block = read_block_header(r)?;
+        let block = read_stream_block_header(r, &header, geometry)?;
         if block.block_type == BlockType::EndOfStream {
             blocks.push(block);
             return Ok(StreamLayout {
@@ -403,10 +467,11 @@ fn encode_segments<R: Read, W: Write>(
             .ok_or_else(|| BatoError::CorruptStream("size overflow".into()))?;
         crc = crc32c_combine(crc, original.crc, original.length);
         for result in chunks {
-            let cost = block_cost(
+            let cost = compact_block_cost(
                 result.header.block_type,
                 result.header.uncompressed_size as usize,
                 result.bytes.len(),
+                descriptor,
             );
             compressed += cost as u64;
             let timing = o.execution.stats.timing();
@@ -422,7 +487,12 @@ fn encode_segments<R: Read, W: Write>(
                 Part::BlockHeaders,
                 cost - result.bytes.len() - BLOCK_CRC_BYTES as usize,
             );
-            write_block(w, &result.header, &result.bytes, Some(result.crc))?;
+            write_block(
+                w,
+                &result.header,
+                &result.bytes,
+                Some((result.crc, descriptor)),
+            )?;
         }
         checkpoint(
             w,
@@ -533,6 +603,9 @@ impl<R: Read> DecompressReader<R> {
     pub fn kind(&self) -> StreamKind {
         self.kind
     }
+    pub(crate) fn version_minor(&self) -> u8 {
+        self.version_minor
+    }
     fn read_footer(&mut self) -> Result<(), BatoError> {
         let total = varint::read(&mut self.reader)?;
         let mut f = [0; FOOTER_CRC_BYTES];
@@ -569,6 +642,7 @@ impl<R: Read> DecompressReader<R> {
     }
     fn prefetch(&mut self) -> Result<(), BatoError> {
         let descriptor = self.descriptor;
+        let shape = (self.version_minor >= COMPACT_VERSION_MINOR).then_some(descriptor);
         while self.footer.is_none() && self.pool.outstanding() < self.pool.capacity() {
             let lease = self.pool.prepare_job()?;
             let mut chunks = Vec::new();
@@ -576,8 +650,8 @@ impl<R: Read> DecompressReader<R> {
             let mut coding = None;
             let mut limit = descriptor.segment_bytes();
             while length < limit {
-                let header = read_block_header(&mut self.reader)?;
-                self.compressed += header_len(&header) as u64;
+                let header = read_sized_block_header(&mut self.reader, shape)?;
+                self.compressed += header_len(&header, shape) as u64;
                 if header.block_type == BlockType::EndOfStream {
                     self.read_footer()?;
                     break;
@@ -619,6 +693,14 @@ impl<R: Read> DecompressReader<R> {
                 {
                     return Err(BatoError::CorruptStream(
                         "fragment packet requires format 1.24".into(),
+                    ));
+                }
+                if self.version_minor < COMPACT_VERSION_MINOR
+                    && header.block_type == BlockType::LzHuffman
+                    && payload.starts_with(&[0, 0])
+                {
+                    return Err(BatoError::CorruptStream(
+                        "stored-prefix packet requires format 1.25".into(),
                     ));
                 }
                 let mut crc = [0; BLOCK_CRC_BYTES as usize];

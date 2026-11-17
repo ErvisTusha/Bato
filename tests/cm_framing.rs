@@ -1,5 +1,5 @@
 use bato_engine::{
-    compress_with_options, decompress_with_options, read_block_header, read_geometry,
+    compress_with_options, decompress_with_options, read_geometry, read_stream_block_header,
     read_stream_header, BatoError, BlockType, CompressionOptions, DecodeLimits,
     DecompressionOptions, ExecutionOptions, Geometry, MemoryBudget,
 };
@@ -85,13 +85,13 @@ fn raw_coded_and_segmented_data_restore_deterministically() {
 }
 fn blocks(encoded: &[u8]) -> Vec<(usize, bato_engine::BlockHeader)> {
     let mut input = Cursor::new(encoded);
-    read_stream_header(&mut input).unwrap();
+    let stream = read_stream_header(&mut input).unwrap();
     let descriptor = read_geometry(&mut input).unwrap();
     assert_eq!((descriptor.segment_size, descriptor.chunk_size), (S, C));
     let mut output = Vec::new();
     loop {
         let offset = input.position() as usize;
-        let header = read_block_header(&mut input).unwrap();
+        let header = read_stream_block_header(&mut input, &stream, descriptor).unwrap();
         if header.block_type == BlockType::EndOfStream {
             break;
         }
@@ -264,7 +264,7 @@ fn chunk_engine_geometry_and_checksums_are_strict() {
         decompress_with_options(&bad, &decode_options()),
         Err(BatoError::CorruptStream(_))
     ));
-    // Canonical varints: no zero size, overlong encodings, or overflow.
+    // Reject incomplete blocks, overlong varints, and overflow.
     for field in [
         vec![0],
         vec![0x81, 0],
@@ -277,8 +277,10 @@ fn chunk_engine_geometry_and_checksums_are_strict() {
     }
     for (offset, _) in chunks {
         let mut cursor = Cursor::new(&encoded);
+        let stream = read_stream_header(&mut cursor).unwrap();
+        let geometry = read_geometry(&mut cursor).unwrap();
         cursor.set_position(offset as u64);
-        let header = read_block_header(&mut cursor).unwrap();
+        let header = read_stream_block_header(&mut cursor, &stream, geometry).unwrap();
         let crc_at = cursor.position() as usize + header.compressed_size as usize;
         let mut crc = encoded.clone();
         crc[crc_at] ^= 1;
@@ -320,8 +322,9 @@ fn fragmented_reads_limits_and_preflight() {
         input.position(),
         {
             let mut header = Cursor::new(&encoded);
-            header.set_position(10);
-            read_block_header(&mut header).unwrap();
+            let stream = read_stream_header(&mut header).unwrap();
+            let geometry = read_geometry(&mut header).unwrap();
+            read_stream_block_header(&mut header, &stream, geometry).unwrap();
             header.position()
         },
         "oversized first chunk must be rejected before reading its payload"

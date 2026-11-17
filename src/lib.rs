@@ -6,8 +6,8 @@ pub use crate::core::archive::{
 };
 pub use crate::core::frame::{
     compress_stream, decompress_stream, decompress_stream_with_limits,
-    decompress_stream_with_options, read_block_header, read_geometry, read_stream_header,
-    read_stream_layout, DecompressReader, StreamLayout,
+    decompress_stream_with_options, read_block_header, read_geometry, read_stream_block_header,
+    read_stream_header, read_stream_layout, DecompressReader, StreamLayout,
 };
 pub use crate::core::types::{
     BatoError, BlockHeader, BlockType, CompressionOptions, Compute, DecodeLimits,
